@@ -48,8 +48,8 @@ npm test
 - [x] 守卫脚本快照（8 个插件，992 测试通过）
 - [x] 适配器骨架（adapter/，permission 主通道）
 - [x] P0 验证实验（docs/p0-validation-results.md：R1 ✅ R2 ✅ R3 ⚠️）
-- [ ] 适配器补 execute.before 通道（内容级守卫）
-- [ ] 接入第一个端到端守卫（block-dangerous-commands）并实测拦截
+- [x] 适配器双通道（permission evaluate + execute.before）
+- [x] 端到端拦截实测（git-safety 拦 force push ✅、config-guard 拦 hooks.json 写入 ✅）
 - [ ] A 级 11 个插件逐个接入
 - [ ] B/C 级数据源重写
 

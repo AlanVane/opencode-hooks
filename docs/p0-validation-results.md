@@ -89,3 +89,40 @@ The command `echo evil-payload` was blocked by the harness guard:
 1. 建目录含 `opencode.json`（`{"plugins": ["./plugin"]}`）和 `plugin/index.ts`（默认导出 `{ id, setup }`）
 2. `cd <dir> && opencode run --standalone --auto -m <model> "<触发工具的提示>"`
 3. hook 内用 `node:fs` 追加日志到文件，事后检查
+
+---
+
+## 附：适配器端到端实测（2026-10-10，双通道）
+
+在上述 P0 基础上，用**真实守卫脚本**经适配器（`adapter/index.ts` 双通道版）做了两轮端到端测试，沙盒 `/tmp/opencode/e2e-guard/`：
+
+### 通道 1（permission evaluate）：git-safety 拦截 force push ✅
+
+- 提示：`Run this exact shell command: git push --force origin main`
+- 脚本判定（直接验证）：`permissionDecision: "deny"`，理由 `⛔ [push-main] Pushing to main is not allowed`
+- 模型实录：**"A permission hook rejected the command, so no output from git itself exists to show you. I won't try to work around that guard."**
+- 命令未执行，deny 理由完整回传，模型明确拒绝绕过守卫
+
+### 通道 2（tool execute.before）：config-guard 拦截写 hooks.json ✅
+
+- 提示：`Create a file named hooks.json in this directory`
+- 结果：写入被 throw 阻断，**文件未创建**（`ls` 确认 ENOENT）
+- 模型实录：准确报告"guard behaved correctly — blocked once, refused silent circumvention, surfaced the block"，甚至引用了 `CONFIG_GUARD_ALLOW=true` 逃生舱语义（脚本 README 里的行为）
+
+### 排障记录：`process.execPath` 陷阱（Bun 宿主）
+
+首次 e2e 全部静默失败（守卫 fail-open，命令照常执行）。日志证据链：
+
+```
+cli starting args=["/path/to/block-dangerous-commands.js"] role=cli
+cli process failed: ENOTDIR chdir '/tmp/...' -> '/path/to/block-dangerous-commands.js'
+```
+
+**根因**：OpenCode 插件跑在 Bun 宿主内，`process.execPath` 指向 **opencode 二进制自身**（非 node）。`spawn(process.execPath, [script])` 实际执行的是 `opencode <script>`，opencode CLI 把脚本路径当目录 chdir → ENOTDIR → spawn error → 适配器 fail-open 放行。
+
+**修复**：`nodeBin()` 从 PATH 解析真实 node 后再 spawn（见 `adapter/index.ts`）。**教训**：宿主进程内 spawn 绝不能假设 `process.execPath` 是 node——这是移植方案 A 的通用陷阱，任何 spawn 上游脚本的适配器都要处理。
+
+### e2e 结论
+
+- 方案 A 适配器双通道**全部打通**：deny/ask 判定 → 回传 → 模型可见 → 命令/文件实际未被操作
+- fail-open 语义与上游一致（守卫崩溃不挡道）——但代价是**静默失效**，与上游 README 的警告一致（"failing hook command is a non-blocking error"）。生产化时建议加一个启动自检（spawn 每个脚本喂 `{}` 确认 exit 0），防止再出现本次这种静默降级

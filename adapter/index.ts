@@ -8,136 +8,196 @@
  *   stdout: { hookSpecificOutput: { permissionDecision, permissionDecisionReason } }
  *   exit 2: block (stderr carries the reason)
  *
- * Mapping (see docs/opencode-port-feasibility.md §2):
- *   permission.hook("evaluate")  <- PreToolUse (deny/ask channel)
- *   tool.hook("execute.after")   <- PostToolUse (fire-and-forget recorders)
+ * Two channels, validated by the P0 experiments (docs/p0-validation-results.md):
  *
- * P0 validation status (docs/p0-validation-results.md, 2026-10-10):
- *   R2 confirmed: permission evaluate fires for every tool call under the
- *     default allow policy; shell resources carry the raw command text;
- *     flipping effect to deny/ask hard-blocks with the message fed back.
- *   R1 confirmed: throwing in execute.before blocks the tool and the error
- *     message reaches the model — wire that channel next for content-level
- *     guards (protect-tests new_string checks etc).
- *   R3 partial: throwing in the prompt hook blocks admission, but the client
- *     only sees a 500; combine with prompt-text rewrite when a visible
- *     rejection reason matters.
+ *   1. permission.hook("evaluate")  <- shell/read/grep/glob/subagent actions.
+ *      R2-validated: fires for every call under default allow rules; the
+ *      resource IS the command text (shell) or the path (read); flipping
+ *      effect to deny/ask hard-blocks with `message` fed back to the model.
+ *
+ *   2. tool.hook("execute.before")  <- edit/write/patch actions, which carry
+ *      the FULL input (old_string/new_string/content) the permission channel
+ *      does not expose. R1-validated: throwing blocks the tool and the error
+ *      message reaches the model. Caveat: no "ask" in this channel — an ask
+ *      verdict degrades to deny (throw). Guards that need ask-on-edit keep
+ *      their shell-side ask via channel 1.
+ *
+ * Each (guard, action) pair runs on exactly one channel to avoid double
+ * execution: file-mutation actions go to channel 2, everything else channel 1.
+ *
+ * Fail-open, matching upstream: script error / malformed output -> pass.
  */
 import { Plugin } from "@opencode/plugin"
 import { spawn } from "node:child_process"
+import { accessSync, constants as fsConstants } from "node:fs"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 
-// --- Claude Code tool_name mapping from OpenCode permission actions ---------
-// resource semantics: shell -> command text, read/edit -> target path
+// OpenCode plugins run inside the Bun host, where process.execPath is the
+// opencode binary itself — spawning it with a script path re-enters the
+// opencode CLI and fails (ENOTDIR). Resolve a real node from PATH instead.
+function nodeBin(): string {
+  for (const dir of (process.env.PATH ?? "").split(":")) {
+    if (!dir) continue
+    try {
+      const candidate = join(dir, "node")
+      accessSync(candidate, fsConstants.X_OK)
+      return candidate
+    } catch {}
+  }
+  return "node" // last resort: let spawn resolve via PATH
+}
+
+// Guard scripts live next to the adapter in this repo, not in the target project.
+const PLUGINS_DIR = fileURLToPath(new URL("../plugins", import.meta.url))
+
+// --- Claude Code tool_name mapping ------------------------------------------
+// Channel 1 (permission action -> Claude Code tool name)
 const ACTION_TO_TOOL: Record<string, string> = {
   shell: "Bash",
   read: "Read",
-  edit: "Edit", // covers edit/write/patch; guards treat Edit+Write the same
   grep: "Grep",
   glob: "Glob",
   subagent: "Task", // subagent-spawn-cap matches Agent|Task
 }
+// Channel 2 (OpenCode tool id -> Claude Code tool name + input reshaper)
+const TOOL_CHANNEL: Record<string, { toolName: string; reshape: (input: any) => any }> = {
+  edit: { toolName: "Edit", reshape: (i) => ({ file_path: i.path, old_string: i.oldString, new_string: i.newString, replace_all: i.replaceAll }) },
+  write: { toolName: "Write", reshape: (i) => ({ file_path: i.path, content: i.content }) },
+  // patch merges several mutations; guards see it as a Write of the combined text
+  patch: { toolName: "Write", reshape: (i) => ({ file_path: "(patch)", content: i.patchText }) },
+}
 
 interface GuardConfig {
-  /** script path relative to the repo's plugins/ dir, e.g. "block-dangerous-commands/block-dangerous-commands.js" */
+  /** script path relative to this repo's plugins/ dir */
   script: string
-  /** OpenCode permission actions this guard cares about */
+  /** channel 1: permission actions; channel 2: tool ids */
   actions: string[]
-  /** extra env for the script (HOOK_SAFETY_LEVEL, HOOK_ASK_*, ...) */
   env?: Record<string, string>
 }
 
-const DEFAULT_GUARDS: GuardConfig[] = [
+// Guards whose file-mutation checks run with full input (channel 2):
+const TOOL_CHANNEL_GUARDS: GuardConfig[] = [
+  { script: "config-guard/config-guard.js", actions: ["edit", "write", "patch"] },
+  { script: "protect-tests/protect-tests.js", actions: ["edit", "write", "patch"] },
+  { script: "protect-secrets/protect-secrets.js", actions: ["edit", "write", "patch"] },
+]
+// Everything else sees command text / paths (channel 1):
+const PERMISSION_GUARDS: GuardConfig[] = [
   { script: "block-dangerous-commands/block-dangerous-commands.js", actions: ["shell"] },
   { script: "git-safety/git-safety.js", actions: ["shell"] },
-  { script: "protect-secrets/protect-secrets.js", actions: ["shell", "read", "edit", "grep"] },
-  { script: "config-guard/config-guard.js", actions: ["shell", "edit"] },
-  // R1 confirmed (p0-validation-results.md): execute.before can block by
-  // throwing, and sees full input — content-level checks move to the
-  // execute.before channel once wired; path-level shell checks already work here.
-  { script: "protect-tests/protect-tests.js", actions: ["shell", "edit"] },
+  { script: "case-insensitive-guard/case-insensitive-guard.js", actions: ["shell"] },
+  { script: "protect-secrets/protect-secrets.js", actions: ["shell", "read", "grep"] },
+  { script: "config-guard/config-guard.js", actions: ["shell"] },
+  { script: "protect-tests/protect-tests.js", actions: ["shell"] },
   { script: "subagent-spawn-cap/subagent-spawn-cap.js", actions: ["subagent"] },
 ]
 
 interface ClaudeHookResult {
+  hookSpecificOutput?: { permissionDecision?: "allow" | "ask" | "deny"; permissionDecisionReason?: string }
+  // legacy/inline shapes some upstream scripts emit
   permissionDecision?: "allow" | "ask" | "deny"
   permissionDecisionReason?: string
 }
 
+interface Verdict {
+  decision: "deny" | "ask" | null
+  reason?: string
+}
+
 /** Run one guard script with a Claude Code shaped payload; fail-open like upstream. */
-function runGuard(
-  scriptPath: string,
-  payload: Record<string, unknown>,
-  env: Record<string, string> = {},
-): Promise<ClaudeHookResult | null> {
+function runGuard(scriptPath: string, payload: Record<string, unknown>, env: Record<string, string> = {}): Promise<Verdict> {
   return new Promise((resolve) => {
     let out = ""
-    const child = spawn(process.execPath, [scriptPath], {
+    const child = spawn(nodeBin(), [scriptPath], {
       env: { ...process.env, ...env },
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "ignore"],
+      // git-safety shells out to git, which needs a repository cwd (may not
+      // exist for synthetic payloads; the script handles its own fallbacks)
+      cwd: typeof payload.cwd === "string" ? payload.cwd : process.env.HOME,
     })
     child.stdout.on("data", (d) => (out += d))
-    // upstream guards print the reason to stderr on exit 2; capture but the
-    // stdout decision is authoritative
-    child.stderr.on("data", () => {})
-    child.on("error", () => resolve(null)) // fail-open, same as upstream catch
+    child.on("error", () => resolve({ decision: null })) // fail-open
     child.on("close", (code) => {
       if (code === 2) {
-        // exit-2 guards (config-watch style) block without stdout JSON
-        resolve({ permissionDecision: "deny", permissionDecisionReason: `guard blocked (exit 2): ${scriptPath}` })
+        resolve({ decision: "deny", reason: `guard blocked (exit 2): ${scriptPath}` })
         return
       }
       try {
-        resolve(JSON.parse(out || "{}"))
+        const parsed: ClaudeHookResult = JSON.parse(out || "{}")
+        const decision = parsed.hookSpecificOutput?.permissionDecision ?? parsed.permissionDecision ?? null
+        const reason = parsed.hookSpecificOutput?.permissionDecisionReason ?? parsed.permissionDecisionReason
+        resolve({ decision: decision === "deny" || decision === "ask" ? decision : null, reason })
       } catch {
-        resolve(null) // malformed output -> fail-open (upstream behavior)
+        resolve({ decision: null }) // malformed output -> fail-open (upstream behavior)
       }
     })
     child.stdin.end(JSON.stringify(payload))
   })
 }
 
+/** First blocking verdict wins (guard-pack semantics); ask survives until a deny. */
+function applyVerdict(event: { effect: string; message?: string }, verdict: Verdict): boolean {
+  if (verdict.decision === "deny") {
+    event.effect = "deny"
+    event.message = verdict.reason
+    return true
+  }
+  if (verdict.decision === "ask" && event.effect !== "deny") {
+    event.effect = "ask"
+    event.message = verdict.reason
+  }
+  return false
+}
+
 export default Plugin.define({
   id: "claude-code-hooks.adapter",
   async setup(ctx) {
-    const repoRoot = join(ctx.location.directory)
-    const guards = DEFAULT_GUARDS // TODO: accept ctx.options.guards
+    const cwd = ctx.location.directory
 
+    // --- Channel 1: permission evaluate (shell/read/grep/glob/subagent) -----
     await ctx.permission.hook("evaluate", async (event) => {
-      // R2 validation point: log every evaluation to confirm coverage
-      for (const guard of guards) {
+      const toolName = ACTION_TO_TOOL[event.action]
+      if (!toolName) return
+      for (const guard of PERMISSION_GUARDS) {
         if (!guard.actions.includes(event.action)) continue
-        const toolName = ACTION_TO_TOOL[event.action]
-        if (!toolName) continue
+        // Resources may hold several values (scanner-split compound commands):
+        // build one payload per resource, first deny wins (any() semantics).
+        for (const resource of event.resources) {
+          const payload = {
+            hook_event_name: "PreToolUse",
+            tool_name: toolName,
+            tool_input:
+              event.action === "shell" ? { command: resource } :
+              event.action === "grep" ? { pattern: resource } :
+              { file_path: resource },
+            session_id: event.sessionID,
+            cwd,
+          }
+          const verdict = await runGuard(join(PLUGINS_DIR, guard.script), payload, guard.env)
+          if (applyVerdict(event, verdict)) return
+        }
+      }
+    })
 
-        // Build the Claude Code PreToolUse payload from the permission event.
+    // --- Channel 2: tool execute.before (edit/write/patch, full input) ------
+    await ctx.tool.hook("execute.before", async (event) => {
+      const spec = TOOL_CHANNEL[event.tool]
+      if (!spec) return
+      for (const guard of TOOL_CHANNEL_GUARDS) {
+        if (!guard.actions.includes(event.tool)) continue
         const payload = {
           hook_event_name: "PreToolUse",
-          tool_name: toolName,
-          tool_input:
-            event.action === "shell"
-              ? { command: event.resources[0] }
-              : { file_path: event.resources[0] },
+          tool_name: spec.toolName,
+          tool_input: spec.reshape(event.input),
           session_id: event.sessionID,
-          cwd: repoRoot,
-          permission_mode: event.effect,
+          cwd,
         }
-
-        const result = await runGuard(join(repoRoot, "plugins", guard.script), payload, guard.env)
-        const decision = result?.hookSpecificOutput?.permissionDecision
-          ?? (result as ClaudeHookResult | null)?.permissionDecision
-        const reason = result?.hookSpecificOutput?.permissionDecisionReason
-          ?? (result as ClaudeHookResult | null)?.permissionDecisionReason
-
-        if (decision === "deny") {
-          event.effect = "deny"
-          event.message = reason
-          return // first blocking verdict wins (guard-pack semantics)
-        }
-        if (decision === "ask" && event.effect !== "deny") {
-          event.effect = "ask"
-          event.message = reason
-          // keep scanning: a later guard may still hard-deny
+        const verdict = await runGuard(join(PLUGINS_DIR, guard.script), payload, guard.env)
+        if (verdict.decision === "deny") {
+          // R1-validated: throw blocks the tool; message reaches the model.
+          // "ask" is not expressible here and also degrades to a throw.
+          throw new Error(verdict.reason ?? `guard blocked: ${guard.script}`)
         }
       }
     })
