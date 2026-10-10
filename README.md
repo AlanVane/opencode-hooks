@@ -29,7 +29,8 @@ opencode-hooks/
 │   ├── protect-tests/
 │   └── subagent-spawn-cap/
 ├── docs/
-│   └── opencode-port-feasibility.md   # 完整可行性报告
+│   ├── opencode-port-feasibility.md   # 完整可行性报告
+│   └── p0-validation-results.md       # P0 实验结果（R1 ✅ R2 ✅ R3 ⚠️）
 ├── LICENSE
 └── NOTICE                      # 上游署名
 ```
@@ -39,10 +40,18 @@ opencode-hooks/
 ```bash
 # 运行已复制插件的测试（验证脚本在新位置完好）
 npm test
-
-# P0 验证实验（R1-R3，见可行性报告第五章）
-# TODO: 实验插件待建
 ```
+
+## 进度
+
+- [x] 可行性报告（docs/opencode-port-feasibility.md）
+- [x] 守卫脚本快照（8 个插件，992 测试通过）
+- [x] 适配器骨架（adapter/，permission 主通道）
+- [x] P0 验证实验（docs/p0-validation-results.md：R1 ✅ R2 ✅ R3 ⚠️）
+- [ ] 适配器补 execute.before 通道（内容级守卫）
+- [ ] 接入第一个端到端守卫（block-dangerous-commands）并实测拦截
+- [ ] A 级 11 个插件逐个接入
+- [ ] B/C 级数据源重写
 
 ## 文档
 

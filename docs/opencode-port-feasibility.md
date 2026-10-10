@@ -122,11 +122,11 @@
 
 ## 五、关键风险与待验证项（P0，实施前必须逐条跑通）
 
-| # | 风险 | 验证方法 | 若不成立的兜底 |
-|---|---|---|---|
-| **R1** | `tool.hook("execute.before")` 文档只说"inspect or replace input"，**未明确说明抛错能否阻断工具执行**（二进制分析显示 hook 在工具执行前 yield，抛错大概率中止，但未经实测） | 写一个抛错插件，`opencode run` 实测 | protect-tests 等内容级守卫只能退到 permission 通道（edit 只给路径，内容拿不到 → 需接受降级） |
-| **R2** | permission evaluate 是否**对所有工具调用**触发（文档只说 allow/ask 触发、配置 deny 不触发——守卫正是要在 allow 之上翻转成 deny，需确认默认 `* allow` 策略下每次调用都会过 hook），以及 shell 的 scanner 是否能完整还原复合命令 | 实测 + 打印 payload | 改用 `execute.before` + R1 兜底 |
-| **R3** | `session.hook("prompt")` 无 typed 拒绝 API；文档提到"preparation 失败则 prompt 不被 admit"——**抛错是否等于阻断 prompt**（cache-tax 拒绝一次、instructions-audit 锁会话都依赖此） | 实测 | 降级为"改写 prompt 文本为警告"（弱化但可用） |
+| # | 风险 | 验证方法 | 若不成立的兜底 | 状态 |
+|---|---|---|---|---|
+| **R1** | `tool.hook("execute.before")` 文档只说"inspect or replace input"，**未明确说明抛错能否阻断工具执行** | ~~实测~~ | protect-tests 等内容级守卫只能退到 permission 通道 | ✅ 2026-10-10 已验证：抛错即阻断，错误消息回传模型（见 [p0-validation-results.md](p0-validation-results.md)） |
+| **R2** | permission evaluate 是否**对所有工具调用**触发，shell 的 scanner 是否能完整还原复合命令 | ~~实测~~ | 改用 `execute.before` + R1 兜底 | ✅ 2026-10-10 已验证：默认 allow 下每次调用都触发；shell 资源=命令原文；deny/ask 翻转生效。复合命令拆分未测，适配器按 any() 语义匹配 |
+| **R3** | `session.hook("prompt")` 抛错是否等于阻断 prompt | ~~实测~~ | 降级为"改写 prompt 文本为警告" | ⚠️ 2026-10-10 已验证：可阻断但客户端只见 500，veto 原因不透传；拒绝场景需配文本改写兜底 |
 | **R4** | 无 `SessionEnd` 精确事件，session-logger 的落盘时机 | 组合 `session.deleted` + `location.shutdown` + idle 定时 flush | 接受"关机时可能丢最后几条" |
 | **R5** | `ConfigChange` / `InstructionsLoaded` 完全缺失 | fs.watch / context 扫描原型 | 见 C 级表 |
 | **R6** | 分发链路：OpenCode 无 marketplace，`/plugin install` 体验不可复制 | 以 npm 包 + `plugins` 数组发布；验证 `plugin.check/update` API 是否支撑升级体验 | 文档化手动配置流程 |

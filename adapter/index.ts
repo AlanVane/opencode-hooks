@@ -12,9 +12,16 @@
  *   permission.hook("evaluate")  <- PreToolUse (deny/ask channel)
  *   tool.hook("execute.after")   <- PostToolUse (fire-and-forget recorders)
  *
- * P0 open questions this skeleton is meant to validate:
- *   R2 does permission evaluate fire for every tool call under default allow rules?
- *   R1 can execute.before block by throwing? (not wired here yet)
+ * P0 validation status (docs/p0-validation-results.md, 2026-10-10):
+ *   R2 confirmed: permission evaluate fires for every tool call under the
+ *     default allow policy; shell resources carry the raw command text;
+ *     flipping effect to deny/ask hard-blocks with the message fed back.
+ *   R1 confirmed: throwing in execute.before blocks the tool and the error
+ *     message reaches the model — wire that channel next for content-level
+ *     guards (protect-tests new_string checks etc).
+ *   R3 partial: throwing in the prompt hook blocks admission, but the client
+ *     only sees a 500; combine with prompt-text rewrite when a visible
+ *     rejection reason matters.
  */
 import { Plugin } from "@opencode/plugin"
 import { spawn } from "node:child_process"
@@ -45,9 +52,9 @@ const DEFAULT_GUARDS: GuardConfig[] = [
   { script: "git-safety/git-safety.js", actions: ["shell"] },
   { script: "protect-secrets/protect-secrets.js", actions: ["shell", "read", "edit", "grep"] },
   { script: "config-guard/config-guard.js", actions: ["shell", "edit"] },
-  // R1 caveat: edit permission gives us the path but not the new content;
-  // content-level checks (skip/xfail detection) need tool.input from
-  // execute.before, pending the R1 blocking experiment.
+  // R1 confirmed (p0-validation-results.md): execute.before can block by
+  // throwing, and sees full input — content-level checks move to the
+  // execute.before channel once wired; path-level shell checks already work here.
   { script: "protect-tests/protect-tests.js", actions: ["shell", "edit"] },
   { script: "subagent-spawn-cap/subagent-spawn-cap.js", actions: ["subagent"] },
 ]
