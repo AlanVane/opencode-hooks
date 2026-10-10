@@ -1,0 +1,13 @@
+{
+  "name": "opencode-hooks-adapter",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Adapter that runs claude-code-hooks guard scripts as OpenCode V2 plugin hooks (feasibility plan A)",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.0.26"
+  }
+}

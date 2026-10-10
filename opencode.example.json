@@ -1,0 +1,5 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "$schema-docs": "Example project config wiring the adapter; copy into a project as opencode.json",
+  "plugins": ["./adapter"]
+}
