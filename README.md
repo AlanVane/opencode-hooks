@@ -52,7 +52,7 @@ npm test
 - [x] 端到端实测（四通道全通过：force-push 拦截、hooks.json 拦截、auto-stage/format-code 生效、notify-permission 触发、subagent-cap 拦截）
 - [x] 启动自检 probeGuards（防 fail-open 静默失效）
 - [x] A 级 11 个插件全部接入
-- [ ] A 级上游测试在新仓库回归（adapter 接线后跑 plugins/*/tests）
+- [x] A 级上游测试在新仓库回归（1063/1063 通过，含新增插件 71 个）
 - [ ] B/C 级数据源重写
 
 ## 文档
