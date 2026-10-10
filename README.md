@@ -48,9 +48,11 @@ npm test
 - [x] 守卫脚本快照（8 个插件，992 测试通过）
 - [x] 适配器骨架（adapter/，permission 主通道）
 - [x] P0 验证实验（docs/p0-validation-results.md：R1 ✅ R2 ✅ R3 ⚠️）
-- [x] 适配器双通道（permission evaluate + execute.before）
-- [x] 端到端拦截实测（git-safety 拦 force push ✅、config-guard 拦 hooks.json 写入 ✅）
-- [ ] A 级 11 个插件逐个接入
+- [x] 适配器四通道（permission evaluate + execute.before + execute.after + event stream）
+- [x] 端到端实测（四通道全通过：force-push 拦截、hooks.json 拦截、auto-stage/format-code 生效、notify-permission 触发、subagent-cap 拦截）
+- [x] 启动自检 probeGuards（防 fail-open 静默失效）
+- [x] A 级 11 个插件全部接入
+- [ ] A 级上游测试在新仓库回归（adapter 接线后跑 plugins/*/tests）
 - [ ] B/C 级数据源重写
 
 ## 文档

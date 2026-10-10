@@ -8,7 +8,8 @@
  *   stdout: { hookSpecificOutput: { permissionDecision, permissionDecisionReason } }
  *   exit 2: block (stderr carries the reason)
  *
- * Two channels, validated by the P0 experiments (docs/p0-validation-results.md):
+ * Three channels, validated by the P0 experiments + e2e runs
+ * (docs/p0-validation-results.md):
  *
  *   1. permission.hook("evaluate")  <- shell/read/grep/glob/subagent actions.
  *      R2-validated: fires for every call under default allow rules; the
@@ -21,6 +22,12 @@
  *      message reaches the model. Caveat: no "ask" in this channel — an ask
  *      verdict degrades to deny (throw). Guards that need ask-on-edit keep
  *      their shell-side ask via channel 1.
+ *
+ *   3. tool.hook("execute.after")   <- PostToolUse recorders/effects
+ *      (auto-stage, format-code), fire-and-forget like upstream "async":true.
+ *
+ * A startup self-check probes every script once (see probeGuards): guards fail
+ * open by design, so a broken spawn must not be silent.
  *
  * Each (guard, action) pair runs on exactly one channel to avoid double
  * execution: file-mutation actions go to channel 2, everything else channel 1.
@@ -92,6 +99,22 @@ const PERMISSION_GUARDS: GuardConfig[] = [
   { script: "protect-tests/protect-tests.js", actions: ["shell"] },
   { script: "subagent-spawn-cap/subagent-spawn-cap.js", actions: ["subagent"] },
 ]
+// Channel 3: PostToolUse recorders/effects — fire-and-forget, no verdict.
+// Only file_path is needed by both scripts today (upstream payloads for
+// Bash/Read variants can be added when other recorders are ported).
+const POST_TOOL_GUARDS: GuardConfig[] = [
+  { script: "auto-stage/auto-stage.js", actions: ["edit", "write"] },
+  { script: "format-code/format-code.js", actions: ["edit", "write"] },
+]
+
+// Every script the adapter may spawn — used by the startup self-check.
+// notify-permission exits 0 on `{}` input too (it just prints `{}`).
+const ALL_SCRIPTS = [
+  ...new Set(
+    [...TOOL_CHANNEL_GUARDS, ...PERMISSION_GUARDS, ...POST_TOOL_GUARDS].map((g) => g.script),
+  ),
+  "notify-permission/notify-permission.js",
+]
 
 interface ClaudeHookResult {
   hookSpecificOutput?: { permissionDecision?: "allow" | "ask" | "deny"; permissionDecisionReason?: string }
@@ -150,6 +173,48 @@ function applyVerdict(event: { effect: string; message?: string }, verdict: Verd
   return false
 }
 
+/**
+ * Startup self-check: every guard script must spawn and exit 0 on `{}` input.
+ * Unlike runGuard this does NOT fail open — a spawn error or non-zero exit is
+ * reported loudly, because a silently-broken guard is indistinguishable from a
+ * guard that never fires (the Bun process.execPath incident in
+ * docs/p0-validation-results.md). Returns the list of broken scripts.
+ */
+function probeGuards(scripts: string[]): Promise<string[]> {
+  return new Promise((resolve) => {
+    const broken: string[] = []
+    let pending = scripts.length
+    if (pending === 0) return resolve(broken)
+    for (const script of scripts) {
+      const scriptPath = join(PLUGINS_DIR, script)
+      let spawned = false
+      let settled = false
+      const settle = (reason?: string) => {
+        if (settled) return
+        settled = true
+        if (reason) broken.push(`${script} (${reason})`)
+        if (--pending === 0) resolve(broken)
+      }
+      const child = spawn(nodeBin(), [scriptPath], {
+        env: process.env,
+        stdio: ["pipe", "ignore", "ignore"],
+        cwd: process.env.HOME,
+      })
+      child.on("spawn", () => (spawned = true))
+      child.on("error", () => settle("spawn failed"))
+      child.on("close", (code) => settle(spawned && code === 0 ? undefined : `exit ${code}`))
+      child.stdin.end("{}")
+      // guard against a hung script stalling setup forever
+      setTimeout(() => {
+        if (!settled) {
+          child.kill()
+          settle("timeout")
+        }
+      }, 10_000).unref?.()
+    }
+  })
+}
+
 export default Plugin.define({
   id: "claude-code-hooks.adapter",
   async setup(ctx) {
@@ -202,8 +267,77 @@ export default Plugin.define({
       }
     })
 
-    // PostToolUse recorders (auto-stage, format-code, ...) wire in here later:
-    // ctx.tool.hook("execute.after", ...) -> runGuard with PostToolUse payload,
-    // fire-and-forget.
+    // --- Channel 3: tool execute.after (PostToolUse recorders/effects) ------
+    // Fire-and-forget like upstream `"async": true`: logging/formatting must
+    // never block the tool call. Both scripts only read file_path today.
+    await ctx.tool.hook("execute.after", (event) => {
+      if (event.status !== "completed") return
+      const spec = TOOL_CHANNEL[event.tool]
+      if (!spec) return
+      for (const recorder of POST_TOOL_GUARDS) {
+        if (!recorder.actions.includes(event.tool)) continue
+        const payload = {
+          hook_event_name: "PostToolUse",
+          tool_name: spec.toolName,
+          tool_input: { file_path: (event.input as { path?: string })?.path },
+          tool_response: { success: true },
+          session_id: event.sessionID,
+          cwd,
+        }
+        // deliberately not awaited: async recorder semantics
+        void runGuard(join(PLUGINS_DIR, recorder.script), payload, recorder.env)
+      }
+    })
+
+    // --- Channel 4: event stream (notify-permission) ------------------------
+    // Upstream wires Notification events (matcher permission_prompt|
+    // idle_prompt) to the Slack notifier. OpenCode has no Notification hook,
+    // but the event stream carries the equivalents:
+    //   permission.asked -> permission_prompt (user must approve a prompt)
+    //   session.idle     -> idle_prompt (session finished, awaiting input)
+    // Fire-and-forget: a Slack blip must never break the session.
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe()) {
+          const type = (event as { type?: string }).type
+          const data = (event as { data?: Record<string, unknown> }).data ?? {}
+          const notification_type =
+            type === "permission.asked" ? "permission_prompt" : type === "session.idle" ? "idle_prompt" : null
+          if (!notification_type) continue
+          const payload = {
+            hook_event_name: "Notification",
+            notification_type,
+            message:
+              typeof data.message === "string" && data.message
+                ? data.message
+                : notification_type === "permission_prompt"
+                  ? `permission requested: ${String(data.action ?? "unknown")}`
+                  : "session is idle, waiting for input",
+            session_id: data.sessionID,
+            cwd,
+          }
+          void runGuard(join(PLUGINS_DIR, "notify-permission/notify-permission.js"), payload)
+        }
+      } catch {
+        // stream closed on shutdown — nothing to do
+      }
+    })()
+
+    // --- Startup self-check (fail-loud, not fail-silent) --------------------
+    // Guard scripts fail open by design, so a broken spawn (bad path, wrong
+    // node, missing dep) would silently disable protection — exactly the
+    // incident from the first e2e run (Bun process.execPath trap). Probe every
+    // script once with `{}` at setup; all scripts exit 0 on empty input.
+    void probeGuards(ALL_SCRIPTS).then((broken) => {
+      if (broken.length > 0) {
+        // console.error lands in the opencode server log; guards stay active
+        // for the scripts that did pass, but the breakage is no longer silent.
+        console.error(
+          `[claude-code-hooks] SELF-CHECK FAILED — these guards will not run: ${broken.join(", ")}`,
+        )
+      } else {
+        console.error(`[claude-code-hooks] self-check ok: ${ALL_SCRIPTS.length} guard scripts spawn and exit cleanly`)
+      }
+    })
   },
 })

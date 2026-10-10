@@ -92,7 +92,7 @@ The command `echo evil-payload` was blocked by the harness guard:
 
 ---
 
-## 附：适配器端到端实测（2026-10-10，双通道）
+## 附：适配器端到端实测（2026-10-10，四通道）
 
 在上述 P0 基础上，用**真实守卫脚本**经适配器（`adapter/index.ts` 双通道版）做了两轮端到端测试，沙盒 `/tmp/opencode/e2e-guard/`：
 
@@ -109,6 +109,37 @@ The command `echo evil-payload` was blocked by the harness guard:
 - 结果：写入被 throw 阻断，**文件未创建**（`ls` 确认 ENOENT）
 - 模型实录：准确报告"guard behaved correctly — blocked once, refused silent circumvention, surfaced the block"，甚至引用了 `CONFIG_GUARD_ALLOW=true` 逃生舱语义（脚本 README 里的行为）
 
+### 通道 3（tool execute.after）：PostToolUse 记录器 ✅（2026-10-10）
+
+- 提示：写 `hello.py`（`print('hi')`）和 `ugly.py`（故意不规范的 `x=1 / y  =  2 / print( x+y )`）
+- 直接日志证据（`~/.claude/hooks-logs/*.jsonl`，上游日志格式原样）：
+  ```json
+  {"hook":"auto-stage","level":"STAGED","file":".../hello.py","tool":"Write"}
+  {"hook":"format-code","level":"FORMATTED","formatter":"ruff","file":".../ugly.py"}
+  ```
+- `ugly.py` 落盘内容被 ruff 规范化为 `x = 1 / y = 2 / print(x + y)`，且两个文件均被 auto-stage 暂存（`git diff --cached` 确认）
+
+### 通道 4（event stream）：notify-permission ✅（2026-10-10）
+
+- 映射：`permission.asked` → `notification_type: permission_prompt`，`session.idle` → `idle_prompt`
+- 沙盒配置 `permissions: [{action: "shell", resource: "*", effect: "ask"}]` 触发 ask 事件
+- 日志证据：
+  ```json
+  {"hook":"notify-permission","level":"INPUT","notification_type":"permission_prompt","message":"permission requested: shell"}
+  {"hook":"notify-permission","level":"NONE","type":"permission_prompt","sent":[],"failed":[]}
+  ```
+- `NONE` 语义正确：未配 `CCH_SLA_WEBHOOK` 时脚本记录但不发送（上游行为）
+
+### 通道 1 扩展：subagent 动作 ✅（2026-10-10）
+
+- `SPAWN_CAP_ASK=1 SPAWN_CAP_DENY=1` 下让模型 spawn 子代理
+- 日志证据：`{"hook":"subagent-spawn-cap","level":"BLOCKED","decision":"deny","count":1,"tool":"Task"}`
+- 模型如实报告 cap 拦截并给出重置/提升阈值的指引
+
+### 启动自检 ✅（2026-10-10）
+
+`opencode run --print-logs` 实录：`[claude-code-hooks] self-check ok: 9 guard scripts spawn and exit cleanly`（接入 notify-permission 后为 10）。自检失败时打印 `SELF-CHECK FAILED — these guards will not run: <list>`，杜绝"装了但没拦"的静默降级。
+
 ### 排障记录：`process.execPath` 陷阱（Bun 宿主）
 
 首次 e2e 全部静默失败（守卫 fail-open，命令照常执行）。日志证据链：
@@ -124,5 +155,6 @@ cli process failed: ENOTDIR chdir '/tmp/...' -> '/path/to/block-dangerous-comman
 
 ### e2e 结论
 
-- 方案 A 适配器双通道**全部打通**：deny/ask 判定 → 回传 → 模型可见 → 命令/文件实际未被操作
-- fail-open 语义与上游一致（守卫崩溃不挡道）——但代价是**静默失效**，与上游 README 的警告一致（"failing hook command is a non-blocking error"）。生产化时建议加一个启动自检（spawn 每个脚本喂 `{}` 确认 exit 0），防止再出现本次这种静默降级
+- 方案 A 适配器**四通道全部打通**并有直接证据（deny/ask 回传、文件未落盘、hook 日志 `STAGED`/`FORMATTED`/`BLOCKED`）：命令/文件实际未被操作，副作用脚本正常执行
+- **A 级 11 个插件全部接入**：block-dangerous-commands、git-safety、case-insensitive-guard、protect-secrets、config-guard、protect-tests（通道 1+2）；auto-stage、format-code（通道 3）；notify-permission（通道 4）；subagent-spawn-cap（通道 1 subagent 动作）
+- fail-open 语义与上游一致（守卫崩溃不挡道）——但代价是**静默失效**，与上游 README 的警告一致（"failing hook command is a non-blocking error"）。已加启动自检（probeGuards：每个脚本喂 `{}` 确认 spawn + exit 0），失败时打印 `SELF-CHECK FAILED` 清单，防止再出现本次这种静默降级
