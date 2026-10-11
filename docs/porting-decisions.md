@@ -5,19 +5,24 @@
 
 ## 最终范围
 
-| 类别 | 数量 | 状态 |
-|---|---|---|
-| A 级（tool/input/permission 通道） | 11 | ✅ 全部接入 + e2e 实证 + 上游测试回归 1063/1063 |
-| B 级（需重建 transcript 数据源） | 6 | ❌ 不移植（用户决策：A 级够用） |
-| C 级（事件缺失需重设计） | 3 | ❌ 不移植（同上） |
+| 类别                               | 数量  | 状态                                            |
+| ---------------------------------- | ----- | ----------------------------------------------- |
+| A 级（tool/input/permission 通道） | 10    | ✅ 全部接入 + e2e 实证 + 上游测试回归 1034/1034 |
+| B 级（需重建 transcript 数据源）   | 6     | ❌ 不移植（用户决策：A 级够用）                 |
+| C 级（事件缺失需重设计）           | 3     | ❌ 不移植（同上）                               |
 
-## 已接入清单（A 级 11 个）
+> 决策时（2026-10-10）A 级为 11 个、测试 1063/1063；2026-10-12 移除
+> notify-permission 后为 10 个、测试 1034/1034（下同）。
+
+## 已接入清单（A 级，现 10 个）
 
 block-dangerous-commands、git-safety、case-insensitive-guard、protect-secrets、
 config-guard、protect-tests（通道 1 permission + 通道 2 execute.before）
 auto-stage、format-code（通道 3 execute.after）
-notify-permission（通道 4 event stream）
 subagent-spawn-cap（通道 1 subagent 动作）
+
+> 注：原 A 级含 notify-permission（通道 4 event stream），已于 2026-10-12
+> 连同适配器通道 4 一并移除（用户决策），A 级由 11 个变为 10 个。
 
 ## 附带结论：session-logger 是"伪 B 级"（分析存档，未实施）
 
@@ -25,13 +30,14 @@ subagent-spawn-cap（通道 1 subagent 动作）
 实际移植难度接近 A 级（约 0.5 人日）。关键映射已用实验钉死
 （探针 `/tmp/opencode/slog-probe/`，2026-10-10）：
 
-| 上游事件 | OpenCode 解法 | 证据 |
-|---|---|---|
+| 上游事件     | OpenCode 解法                                                                   | 证据                                          |
+| ------------ | ------------------------------------------------------------------------------- | --------------------------------------------- |
 | SessionStart | `ctx.session.hook("context")` 首次触发每 session 一次（Set 去重）→ spawn 原脚本 | 探针确认 context hook 带 sessionID 且按时触发 |
-| PostToolUse | 通道 3 现成，需补 `read`/`shell` 映射（shell input 为 `{"command":...}`） | 探针确认工具 id 与 input 形状 |
-| SessionEnd | plugin `setup` 返回 cleanup 函数，进程退出时批量 finalize | **探针确认 cleanup 被调用** |
+| PostToolUse  | 通道 3 现成，需补 `read`/`shell` 映射（shell input 为 `{"command":...}`）       | 探针确认工具 id 与 input 形状                 |
+| SessionEnd   | plugin `setup` 返回 cleanup 函数，进程退出时批量 finalize                       | **探针确认 cleanup 被调用**                   |
 
 已知折衷（若日后重启）：
+
 - TUI 场景 `ended:` 为进程退出时间而非会话结束时间（`opencode run` 场景精确）；
   可选 idle 防抖精化（~30 行）
 - 子代理工具调用在子 sessionID 下触发，需 `parentID` 归并进父笔记（~10 行）

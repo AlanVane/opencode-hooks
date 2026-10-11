@@ -19,6 +19,7 @@ Error: P0-R1: execute.before veto
 ```
 
 **结论**：
+
 - 抛错 = 阻断，且**错误消息原样回传给模型**（模型能看到 veto 原因，可据此自我纠正）——与 Claude Code 的 `permissionDecisionReason` 行为等价。
 - hook 同时能看到完整 `event.input`（`{"path":"/tmp/opencode/p0-r1/a.txt"}`）。
 - **protect-tests 等内容级守卫可以走 execute.before 通道拿到完整 input 并阻断**，无需依赖 permission 通道的内容缺口。R1 从"风险"降级为"已确认可行"。
@@ -45,6 +46,7 @@ The command `echo evil-payload` was blocked by the harness guard:
 ```
 
 **结论**：
+
 - deny 翻转 = 硬阻断，`message` 作为拒绝原因回传给模型。
 - **适配器主通道成立**：A 级守卫的 `permissionDecision: deny/ask` 可完整映射为 `effect: deny/ask`。
 - ⚠️ 细节：复合命令是否被 scanner 拆成多个 resource 本次未测（本例为单命令），适配器应对 `resources` 数组逐个匹配（`any()` 语义），guard-pack 语义即"任一资源命中即拒"。
@@ -55,12 +57,13 @@ The command `echo evil-payload` was blocked by the harness guard:
 
 **结果**：
 
-| 用例 | 结果 |
-|---|---|
-| `"BLOCKME please say hello"` | `Error: UnexpectedStatus: 500`——prompt 未被 admit，**阻断成功**，但用户只看到 500，veto 消息（"P0-R3: prompt veto"）未透出 |
-| `"say hello without any marker"` | 正常回复 Hello!（对照组通过，hook 放行不伤正常流） |
+| 用例                             | 结果                                                                                                                       |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `"BLOCKME please say hello"`     | `Error: UnexpectedStatus: 500`——prompt 未被 admit，**阻断成功**，但用户只看到 500，veto 消息（"P0-R3: prompt veto"）未透出 |
+| `"say hello without any marker"` | 正常回复 Hello!（对照组通过，hook 放行不伤正常流）                                                                         |
 
 **结论**：
+
 - **阻断语义成立**：preparation 失败 → prompt 不 admit（与文档一致）。
 - ⚠️ **质量缺陷**：抛错的消息不透传，客户端只见 500。cache-tax"拒绝一次"、instructions-audit"锁会话"可以依赖此机制**阻止**，但优雅的拒绝原因展示需要替代方案：
   - 兜底：不抛错，改为把 prompt 改写为警告文本 + 注入说明（弱化但可见）；
@@ -71,13 +74,14 @@ The command `echo evil-payload` was blocked by the harness guard:
 
 ## 对可行性报告的修订
 
-| 风险项 | 原判定 | 新判定 |
-|---|---|---|
-| R1 execute.before 能否阻断 | ❓ 未实测 | ✅ **可阻断**，错误消息回传模型；内容级守卫路径完全打通 |
+| 风险项                        | 原判定    | 新判定                                                                       |
+| ----------------------------- | --------- | ---------------------------------------------------------------------------- |
+| R1 execute.before 能否阻断    | ❓ 未实测 | ✅ **可阻断**，错误消息回传模型；内容级守卫路径完全打通                      |
 | R2 permission evaluate 覆盖面 | ❓ 未实测 | ✅ **默认 allow 下每次调用都触发**，deny/ask 翻转均生效；shell 资源=命令原文 |
-| R3 prompt hook 拒绝 | ❓ 未实测 | ⚠️ **可阻断但报错粗糙**（500），拒绝原因不透传，需要改写文本兜底 |
+| R3 prompt hook 拒绝           | ❓ 未实测 | ⚠️ **可阻断但报错粗糙**（500），拒绝原因不透传，需要改写文本兜底             |
 
 **连锁影响**：
+
 - A 级 11 个插件的通道假设全部成立，protect-tests 不再需要降级（R1 解除了内容级拦截的疑虑）。
 - 适配器骨架（`adapter/index.ts`）的 permission 主通道设计正确；后续补充 execute.before 通道用于需要完整 input 的守卫。
 - cache-tax / instructions-audit 的"拒绝提交"能力可用但体验打折，设计时按 R3 兜底方案处理。
@@ -92,7 +96,7 @@ The command `echo evil-payload` was blocked by the harness guard:
 
 ---
 
-## 附：适配器端到端实测（2026-10-10，四通道）
+## 附：适配器端到端实测（2026-10-10，四通道；通道 4 已于 2026-10-12 移除）
 
 在上述 P0 基础上，用**真实守卫脚本**经适配器（`adapter/index.ts` 双通道版）做了两轮端到端测试，沙盒 `/tmp/opencode/e2e-guard/`：
 
@@ -119,7 +123,10 @@ The command `echo evil-payload` was blocked by the harness guard:
   ```
 - `ugly.py` 落盘内容被 ruff 规范化为 `x = 1 / y = 2 / print(x + y)`，且两个文件均被 auto-stage 暂存（`git diff --cached` 确认）
 
-### 通道 4（event stream）：notify-permission ✅（2026-10-10）
+### 通道 4（event stream）：notify-permission ✅（2026-10-10，已于 2026-10-12 移除）
+
+> **状态更新（2026-10-12）**：notify-permission 插件与适配器通道 4 已按用户决策移除，
+> 本节仅作为历史验证记录保留。当前适配器为三通道，自检脚本数为 9。
 
 - 映射：`permission.asked` → `notification_type: permission_prompt`，`session.idle` → `idle_prompt`
 - 沙盒配置 `permissions: [{action: "shell", resource: "*", effect: "ask"}]` 触发 ask 事件
@@ -138,7 +145,7 @@ The command `echo evil-payload` was blocked by the harness guard:
 
 ### 启动自检 ✅（2026-10-10）
 
-`opencode run --print-logs` 实录：`[claude-code-hooks] self-check ok: 9 guard scripts spawn and exit cleanly`（接入 notify-permission 后为 10）。自检失败时打印 `SELF-CHECK FAILED — these guards will not run: <list>`，杜绝"装了但没拦"的静默降级。
+`opencode run --print-logs` 实录：`[claude-code-hooks] self-check ok: 9 guard scripts spawn and exit cleanly`（接入 notify-permission 后曾为 10，该插件移除后回到 9）。自检失败时打印 `SELF-CHECK FAILED — these guards will not run: <list>`，杜绝"装了但没拦"的静默降级。
 
 ### 排障记录：`process.execPath` 陷阱（Bun 宿主）
 
@@ -155,6 +162,6 @@ cli process failed: ENOTDIR chdir '/tmp/...' -> '/path/to/block-dangerous-comman
 
 ### e2e 结论
 
-- 方案 A 适配器**四通道全部打通**并有直接证据（deny/ask 回传、文件未落盘、hook 日志 `STAGED`/`FORMATTED`/`BLOCKED`）：命令/文件实际未被操作，副作用脚本正常执行
-- **A 级 11 个插件全部接入**：block-dangerous-commands、git-safety、case-insensitive-guard、protect-secrets、config-guard、protect-tests（通道 1+2）；auto-stage、format-code（通道 3）；notify-permission（通道 4）；subagent-spawn-cap（通道 1 subagent 动作）
+- 方案 A 适配器**四通道全部打通**（当时口径；现为三通道）并有直接证据（deny/ask 回传、文件未落盘、hook 日志 `STAGED`/`FORMATTED`/`BLOCKED`）：命令/文件实际未被操作，副作用脚本正常执行
+- **A 级 11 个插件全部接入**（历史记录；notify-permission 已于 2026-10-12 移除，现为 10 个）：block-dangerous-commands、git-safety、case-insensitive-guard、protect-secrets、config-guard、protect-tests（通道 1+2）；auto-stage、format-code（通道 3）；notify-permission（通道 4，已移除）；subagent-spawn-cap（通道 1 subagent 动作）
 - fail-open 语义与上游一致（守卫崩溃不挡道）——但代价是**静默失效**，与上游 README 的警告一致（"failing hook command is a non-blocking error"）。已加启动自检（probeGuards：每个脚本喂 `{}` 确认 spawn + exit 0），失败时打印 `SELF-CHECK FAILED` 清单，防止再出现本次这种静默降级

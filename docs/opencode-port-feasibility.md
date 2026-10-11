@@ -70,7 +70,7 @@
 | config-guard | permission evaluate | 保护路径从 `.claude/settings.json` 换成 `opencode.json(c)` / `.opencode/` / 插件清单 |
 | protect-tests | permission evaluate（shell）+ execute.before（edit 内容） | ⚠️ 依赖 R1：edit 内容级拦截需要 execute.before 能阻断 |
 | auto-stage / format-code | `execute.after` 回调内跑 git/ruff/prettier | 比原来更简单：无需 stdout 协议 |
-| notify-permission | 事件流 permission 事件 → Slack webhook | `CCH_SLA_WEBHOOK` 不变 |
+| notify-permission | 事件流 permission 事件 → Slack webhook | `CCH_SLA_WEBHOOK` 不变（⚠️ 2026-10-12 已移除，见 [porting-decisions](porting-decisions.md)） |
 | subagent-spawn-cap | **permission evaluate，`action: "subagent"`** | OpenCode 原生 `subagent` 权限动作 + agent ID 资源，ask=20/deny=60 语义**完美对应**，可能比 Claude Code 版更干净 |
 
 > 💡 **顺带发现**：OpenCode 自带声明式权限系统（wildcard 规则 + policies + 内置 `.env` 读取 ask 默认值）。部分简单守卫（如"禁止 push main"）用原生 `permissions` 配置一行就能实现。移植时建议：**能声明的用声明，复杂模式匹配（管道解析、cd 链解析、Unicode 走私检测）才用 hook**——hook 的不可替代性正在于此。
