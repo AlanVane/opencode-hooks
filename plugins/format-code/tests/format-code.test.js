@@ -13,7 +13,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 
-const { getFormatter, formatFile, log, FORMATTERS } = require('../format-code.js');
+const { getFormatter, formatFile, log, FORMATTERS, detectProjectFormatter, findProjectRoot } = require('../format-code.js');
 
 const SCRIPT_PATH = path.join(__dirname, '../format-code.js');
 
@@ -318,5 +318,76 @@ describe('Config: FORMATTERS structure', () => {
     assert.strictEqual(typeof getFormatter, 'function');
     assert.strictEqual(typeof formatFile, 'function');
     assert.strictEqual(typeof log, 'function');
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Unit Tests - project formatter detection
+// ----------------------------------------------------------------------------
+
+function tmpProject(files) {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'format-code-proj-')));
+  tmpDirs.push(dir);
+  for (const [name, content] of Object.entries(files)) {
+    const fp = path.join(dir, name);
+    fs.mkdirSync(path.dirname(fp), { recursive: true });
+    fs.writeFileSync(fp, content);
+  }
+  return dir;
+}
+
+describe('Unit: findProjectRoot()', () => {
+  it('walks up from a nested directory to the package.json', () => {
+    const root = tmpProject({ 'package.json': '{"name":"x"}' });
+    const nested = path.join(root, 'src', 'deep');
+    fs.mkdirSync(nested, { recursive: true });
+    assert.strictEqual(findProjectRoot(nested), root);
+  });
+
+  it('returns the directory that already holds package.json', () => {
+    const root = tmpProject({ 'package.json': '{}' });
+    assert.strictEqual(findProjectRoot(root), root);
+  });
+
+  it('returns null when no ancestor has a package.json', () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'format-code-noproj-')));
+    tmpDirs.push(dir);
+    assert.strictEqual(findProjectRoot(dir), null);
+  });
+});
+
+describe('Unit: detectProjectFormatter()', () => {
+  it('detects oxfmt from .oxfmtrc.json', () => {
+    const root = tmpProject({ 'package.json': '{}', '.oxfmtrc.json': '{}' });
+    assert.strictEqual(detectProjectFormatter(root), 'oxfmt');
+  });
+
+  it('detects oxfmt from devDependencies', () => {
+    const root = tmpProject({ 'package.json': '{"devDependencies":{"oxfmt":"^0.76.0"}}' });
+    assert.strictEqual(detectProjectFormatter(root), 'oxfmt');
+  });
+
+  it('detects prettier from a config file', () => {
+    const root = tmpProject({ 'package.json': '{}', '.prettierrc': '{}' });
+    assert.strictEqual(detectProjectFormatter(root), 'prettier');
+  });
+
+  it('detects prettier from devDependencies', () => {
+    const root = tmpProject({ 'package.json': '{"devDependencies":{"prettier":"^3.0.0"}}' });
+    assert.strictEqual(detectProjectFormatter(root), 'prettier');
+  });
+
+  it('prefers oxfmt when a project declares both', () => {
+    const root = tmpProject({ 'package.json': '{"devDependencies":{"oxfmt":"1","prettier":"3"}}' });
+    assert.strictEqual(detectProjectFormatter(root), 'oxfmt');
+  });
+
+  it('returns null when the project declares nothing', () => {
+    const root = tmpProject({ 'package.json': '{"name":"plain"}' });
+    assert.strictEqual(detectProjectFormatter(root), null);
+  });
+
+  it('returns null without a project root', () => {
+    assert.strictEqual(detectProjectFormatter(null), null);
   });
 });

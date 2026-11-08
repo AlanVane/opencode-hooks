@@ -28,6 +28,27 @@ const LOG_DIR = path.join(process.env.HOME, '.claude', 'hooks-logs');
 
 const PRETTIER_EXTS = new Set(['.js', '.ts', '.json', '.md', '.yaml', '.yml', '.html']);
 
+// Extensions oxfmt is expected to handle in an oxfmt project. Other extensions
+// (for example .html) still go through prettier.
+const OXFMT_EXTS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.json', '.jsonc', '.md', '.mdx', '.css', '.yaml', '.yml']);
+
+const OXFMT_CONFIG_FILES = ['.oxfmtrc.json', '.oxfmtrc.jsonc', '.oxfmtrc', 'oxfmt.config.ts', 'oxfmt.config.js', 'oxfmt.config.mjs', 'oxfmt.config.cjs'];
+
+const PRETTIER_CONFIG_FILES = [
+  '.prettierrc',
+  '.prettierrc.json',
+  '.prettierrc.json5',
+  '.prettierrc.yml',
+  '.prettierrc.yaml',
+  '.prettierrc.toml',
+  '.prettierrc.js',
+  '.prettierrc.cjs',
+  '.prettierrc.mjs',
+  'prettier.config.js',
+  'prettier.config.cjs',
+  'prettier.config.mjs',
+];
+
 const FORMATTERS = {
   '.py': (fp) => [
     ['uv', 'run', 'ruff', 'check', '--fix', '--exit-zero', '--quiet', fp],
@@ -52,6 +73,56 @@ function getFormatter(filePath) {
   return FORMATTERS[ext] || null;
 }
 
+/** Walk up from a directory until a package.json (the project root) is found. */
+function findProjectRoot(startDir) {
+  let dir = path.resolve(startDir);
+  while (true) {
+    if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+function readPackageJson(root) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pick the formatter the project itself uses. A project that declares oxfmt
+ * gets oxfmt; one that declares prettier (dependency or config file) gets
+ * prettier; anything else falls back to prettier for backwards compatibility.
+ */
+function detectProjectFormatter(root) {
+  if (!root) return null;
+  const pkg = readPackageJson(root);
+  const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
+  const hasOxfmt = OXFMT_CONFIG_FILES.some((f) => fs.existsSync(path.join(root, f))) || Boolean(pkg?.oxfmt) || Boolean(deps.oxfmt);
+  if (hasOxfmt) return 'oxfmt';
+  const hasPrettier = PRETTIER_CONFIG_FILES.some((f) => fs.existsSync(path.join(root, f))) || Boolean(pkg?.prettier) || Boolean(deps.prettier);
+  if (hasPrettier) return 'prettier';
+  return null;
+}
+
+/** Prefer the project's own binary so its pinned version is used. */
+function resolveBinary(root, name) {
+  if (!root) return null;
+  const bin = path.join(root, 'node_modules', '.bin', name);
+  return fs.existsSync(bin) ? bin : null;
+}
+
+function run(argv, cwd) {
+  try {
+    return spawnSync(argv[0], argv.slice(1), { cwd, stdio: 'pipe' });
+  } catch (e) {
+    return { status: -1, stderr: Buffer.from(e.message) };
+  }
+}
+
 function formatFile(filePath, cwd, sessionId) {
   const absPath = path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath);
 
@@ -67,20 +138,38 @@ function formatFile(filePath, cwd, sessionId) {
     return { success: false, error: 'unsupported file type' };
   }
 
-  const formatterName = PRETTIER_EXTS.has(ext) ? 'prettier' : 'ruff';
   const dir = path.dirname(absPath);
+  const projectRoot = findProjectRoot(dir);
+  const projectFormatter = detectProjectFormatter(projectRoot);
+
+  // oxfmt projects: let oxfmt apply the project's own style (.oxfmtrc).
+  // prettier defaults would otherwise rewrite quotes, semicolons and wrapping.
+  if (projectFormatter === 'oxfmt' && OXFMT_EXTS.has(ext)) {
+    const bin = resolveBinary(projectRoot, 'oxfmt');
+    const result = run(bin ? [bin, absPath] : ['npx', '--yes', 'oxfmt', absPath], dir);
+    if (result.status === 0) {
+      log({ level: 'FORMATTED', formatter: 'oxfmt', file: absPath, session_id: sessionId });
+      return { success: true, formatter: 'oxfmt' };
+    }
+    // No prettier fallback: an oxfmt project must never be reformatted with
+    // prettier defaults. Files oxfmt cannot handle (for example .html) simply
+    // stay untouched.
+    const msg = result.stderr?.toString().trim() || `Process exited with code ${result.status}`;
+    log({ level: 'SKIP', reason: 'oxfmt failed', formatter: 'oxfmt', file: absPath, error: msg, session_id: sessionId });
+    return { success: false, error: msg, formatter: 'oxfmt' };
+  }
+
+  const formatterName = ext === '.py' ? 'ruff' : 'prettier';
+  const prettierBin = ext === '.py' ? null : resolveBinary(projectRoot, 'prettier');
 
   for (const args of getCommands(absPath)) {
-    try {
-      const result = spawnSync(args[0], args.slice(1), { cwd: dir, stdio: 'pipe' });
-      if (result.status !== 0) {
-        const msg = result.stderr?.toString().trim() || `Process exited with code ${result.status}`;
-        log({ level: 'ERROR', formatter: formatterName, file: absPath, error: msg, session_id: sessionId });
-        return { success: false, error: msg, formatter: formatterName };
-      }
-    } catch (e) {
-      log({ level: 'ERROR', formatter: formatterName, file: absPath, error: e.message, session_id: sessionId });
-      return { success: false, error: e.message, formatter: formatterName };
+    // Swap `npx --yes prettier` for the project's pinned prettier when present.
+    const argv = prettierBin && args[0] === 'npx' ? [prettierBin, ...args.slice(3)] : args;
+    const result = run(argv, dir);
+    if (result.status !== 0) {
+      const msg = result.stderr?.toString().trim() || `Process exited with code ${result.status}`;
+      log({ level: 'ERROR', formatter: formatterName, file: absPath, error: msg, session_id: sessionId });
+      return { success: false, error: msg, formatter: formatterName };
     }
   }
 
@@ -114,5 +203,5 @@ async function main() {
 if (require.main === module) {
   main();
 } else {
-  module.exports = { getFormatter, formatFile, log, FORMATTERS };
+  module.exports = { getFormatter, formatFile, log, FORMATTERS, detectProjectFormatter, findProjectRoot };
 }
