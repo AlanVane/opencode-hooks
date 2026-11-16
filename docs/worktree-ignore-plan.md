@@ -164,7 +164,7 @@ worktree-ignore/
 
 1. **已决**：插件放在新建的 `worktree-ignore/` 目录，与 `adapter/` 平级，可以单独关闭。
 2. **已决**：触发范围只认 `git worktree add`（以及 `worktree_*` 工具），不含 `remove` / `prune`。
-3. **未决**：全局 `~/.config/git/ignore` 里已有的受管块，是保留，还是删除，以保持单一来源？
+3. **已决**：不再保留全局同名块（单一来源）。已核查：`core.excludesFile` 指向 `~/.config/git/ignore`（dotfiles 仓库的软链），其中没有同名受管块；`~/.ignore` 不存在。因此无需清理。
 4. **未决**：dotfiles 仓库里该文件当前的未提交修改，是随本方案提交，还是回退？这与本仓库无关，需要你单独处理。
 5. **未决**：是否在 skill 侧接入共享脚本？这一项不是必需的。注意本地副本不会随上游更新，也无法同步上游修复。
 6. **未决**：本仓库这次的改动（`worktree-ignore/`、根目录 `package.json`、本文档）尚未提交，目前已自动暂存。
