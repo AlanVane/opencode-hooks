@@ -1,0 +1,13 @@
+{
+  "name": "opencode-hooks-worktree-ignore",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "OpenCode V2 plugin: ensure managed .gitignore/.ignore worktree blocks before a lane is created",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.0.26"
+  }
+}
