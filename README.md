@@ -7,6 +7,8 @@
 
 **范围**：移植 A 级插件（10 个，✅ 已完成；原 A 级 11 个中的 notify-permission 已于 2026-10-12 移除）。B/C 级 9 个不移植——决策记录与候选分析见 [docs/porting-decisions.md](docs/porting-decisions.md)。
 
+此外新增 `worktree-ignore/`：一个独立插件，在新建 git worktree 之前自动写入受管忽略块（非上游移植，见 [docs/worktree-ignore-plan.md](docs/worktree-ignore-plan.md)）。
+
 ## 方案
 
 采用**适配器优先**（可行性报告中的方案 A）：
@@ -21,6 +23,7 @@
 ```
 opencode-hooks/
 ├── adapter/                    # OpenCode 插件基座（方案 A，三通道）
+├── worktree-ignore/            # 新建 worktree 前写入受管忽略块（独立插件）
 ├── plugins/                    # 上游脚本快照（只读复制，勿直接编辑）
 │   ├── auto-stage/             # 通道 3：写后自动 git add
 │   ├── block-dangerous-commands/
@@ -35,7 +38,8 @@ opencode-hooks/
 ├── docs/
 │   ├── opencode-port-feasibility.md   # 完整可行性报告
 │   ├── p0-validation-results.md       # P0 实验 + 三通道 e2e 证据（含历史通道 4 实录）
-│   └── porting-decisions.md           # 范围决策（B/C 不移植）+ session-logger 分析存档
+│   ├── porting-decisions.md           # 范围决策（B/C 不移植）+ session-logger 分析存档
+│   └── worktree-ignore-plan.md        # worktree-ignore 的设计、差异与验证证据
 ├── LICENSE
 └── NOTICE                      # 上游署名
 ```
@@ -46,6 +50,20 @@ opencode-hooks/
 # 运行已复制插件的测试（验证脚本在新位置完好）
 npm test
 ```
+
+## worktree-ignore
+
+新建 git worktree（lane）之前，插件检查仓库根的两个受管块，缺失就写入，确认就位才放行：
+
+- `.gitignore`：让 lane 不进 `git status` / `commit`
+- `.ignore`：让 ripgrep 继续能搜到 lane 里的代码
+
+行为要点：
+
+- 严格模式：写不进去就拒绝这次 `git worktree add`，原因回传模型（`gate.mjs` 的 `FAIL_CLOSED`）。
+- 幂等：已正确时不写盘；只改受管块，块外规则不动。
+- 触发：shell 工具里的 `git worktree add`，以及 `worktree_create` / `worktree_add` 工具。
+- 设计、与原方案的差异、验证证据：见 [docs/worktree-ignore-plan.md](docs/worktree-ignore-plan.md)。
 
 ## 进度
 
@@ -59,14 +77,24 @@ npm test
 - [x] A 级插件全部接入（10 个；notify-permission 已移除）
 - [x] A 级上游测试在新仓库回归（1034/1034 通过；原 1063 含 notify-permission 的 29 个，随该插件移除）
 - [x] 范围收口：B/C 级 9 个不移植（docs/porting-decisions.md，含 session-logger 分析存档）——**项目完成**
+- [x] worktree-ignore 插件（新建 worktree 前写入受管忽略块；18 项单测 + 真实 OpenCode e2e 三组通过）
 
 ## 安装到日常项目
 
 ```jsonc
 // <项目>/opencode.json
 {
-  "plugins": ["/home/alecshan/projects/ai-coding/opencode-hooks/adapter"]
+  "plugins": [
+    "/home/alecshan/projects/ai-coding/opencode-hooks/adapter",
+    "/home/alecshan/projects/ai-coding/opencode-hooks/worktree-ignore",
+  ],
 }
+```
+
+也可以按需全局安装（软链到 OpenCode 的插件目录，重启生效）：
+
+```bash
+ln -s /home/alecshan/projects/ai-coding/opencode-hooks/worktree-ignore ~/.config/opencode/plugins/worktree-ignore
 ```
 
 可选环境变量（守卫脚本原生支持，随进程环境透传）：
@@ -82,3 +110,4 @@ npm test
 - [可行性报告](docs/opencode-port-feasibility.md) — 事件映射、逐插件分级、风险清单（R1-R7）、工作量估算
 - [P0 实验 + e2e 证据](docs/p0-validation-results.md) — R1-R3 实验、三通道端到端实录（含已移除通道 4 的历史记录）、`process.execPath` 排障记录
 - [范围决策](docs/porting-decisions.md) — B/C 不移植的决策、session-logger 可行性分析存档（若日后重启可直接用）
+- [worktree-ignore](docs/worktree-ignore-plan.md) — 设计、严格模式决策、测试与端到端证据、风险与待决事项
