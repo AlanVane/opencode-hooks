@@ -146,6 +146,49 @@ describe('Integration: verdicts through the pack', () => {
     assert.match(reasonOf(output), /Fix the code/);
   });
 
+  it('protect-tests: a Write that skips an existing test is denied, path resolved from the payload cwd', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-pack-tests-'));
+    fs.writeFileSync(path.join(dir, 'math.test.js'), "test('add', () => { expect(1).toBe(1); });\n");
+    const { output } = await runHook(payload('Write',
+      { file_path: 'math.test.js', content: "test.skip('add', () => { expect(1).toBe(1); });\n" },
+      { cwd: dir }));
+    assert.strictEqual(decisionOf(output), 'deny');
+    assert.match(reasonOf(output), /\[skip-test\]/);
+  });
+
+  it('protect-tests: shell output cannot hide skips in search-looking literal text', async () => {
+    const dir = fs.mkdtempSync(path.join(TMP_HOME, 'shell-output-'));
+    fs.writeFileSync(path.join(dir, 'math.test.js'), "test('a', () => {});\n");
+    fs.writeFileSync(path.join(dir, 'source.js'), "test.skip('a', () => {});\n");
+    const emit = `printf '%s\\n' "test.skip('a', () => {});"`;
+    for (const command of [
+      `${emit} | # continue the same pipeline\n tee math.test.js`,
+      `{ ${emit}; } > math.test.js`,
+      "cat > math.test.js <<'EOF'\n// s/\ntest.skip('a', () => {});\n//x/\nEOF",
+      "cat > math.test.js <<'EOF'\n// grep\ntest.skip('a', () => {});\nEOF",
+      "grep 'test.skip(' source.js > math.test.js",
+    ]) {
+      const { output } = await runHook(payload('Bash', { command }, { cwd: dir }));
+      assert.strictEqual(decisionOf(output), 'deny', command);
+      assert.match(reasonOf(output), /\[skip-test\]/);
+    }
+  });
+
+  it('protect-tests: known unskip output and unrelated literal braces are allowed', async () => {
+    const dir = fs.mkdtempSync(path.join(TMP_HOME, 'shell-unskip-'));
+    fs.writeFileSync(path.join(dir, 'math.test.js'), "test('a', () => {});\n");
+    fs.writeFileSync(path.join(dir, 'one-skip.test.js'), "test.skip('a', () => {});\n");
+    for (const command of [
+      "sed 's/test.skip(/test(/g' one-skip.test.js > math.test.js",
+      "grep -v 'test.skip(' one-skip.test.js > math.test.js",
+      "perl -pe 's/test\\.skip\\(/test(/' one-skip.test.js > math.test.js",
+      "printf '%s\\n' { 'test.skip(' > notes.txt; echo hi > math.test.js",
+    ]) {
+      const { output } = await runHook(payload('Bash', { command }, { cwd: dir }));
+      assert.deepStrictEqual(output, {}, command);
+    }
+  });
+
   it('git-safety: push to main denied', async () => {
     const { output } = await runHook(payload('Bash', { command: 'git push origin main' }));
     assert.strictEqual(decisionOf(output), 'deny');
@@ -283,6 +326,18 @@ describe('Integration: subagent-spawn-cap through the pack', () => {
   it('the older Task tool name is matched too', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-pack-spawn-'));
     const { output } = await runHook(payload('Task', { prompt: 'y' }, { session_id: 'pack-s6' }), { HOME: home, SPAWN_CAP_ASK: '1' });
+    assert.strictEqual(decisionOf(output), 'ask');
+  });
+
+  it('a later deny outranks an earlier ask', async () => {
+    // block-dangerous-commands (earlier) asks under HOOK_ASK_HIGH; git-safety (later) denies a push naming main.
+    const { output } = await runHook(payload('Bash', { command: 'git push --force origin main' }), { HOOK_ASK_HIGH: 'true' });
+    assert.strictEqual(decisionOf(output), 'deny');
+    assert.match(output.hookSpecificOutput.permissionDecisionReason, /\[push-main\]/);
+  });
+
+  it('an ask with no later deny is still an ask', async () => {
+    const { output } = await runHook(payload('Bash', { command: 'chmod 777 run.sh' }), { HOOK_ASK_HIGH: 'true' });
     assert.strictEqual(decisionOf(output), 'ask');
   });
 
