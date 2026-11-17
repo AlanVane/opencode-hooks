@@ -2,7 +2,7 @@
 
 将 [claude-code-hooks](https://github.com/karanb192/claude-code-hooks)（22 个 Claude Code hook 插件）移植到 OpenCode V2 的工作仓库。
 
-**基线**：`claude-code-hooks` @ 2026-10-10 快照（只读，本仓库不修改上游）
+**基线**：`claude-code-hooks` @ 2026-11-16（d46ee9b）快照（只读，本仓库不修改上游）
 **许可**：MIT — 保留原作者 Karan Bansal 的署名（见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)）
 
 **范围**：移植 A 级插件（10 个，✅ 已完成；原 A 级 11 个中的 notify-permission 已于 2026-10-12 移除）。B/C 级 9 个不移植——决策记录与候选分析见 [docs/porting-decisions.md](docs/porting-decisions.md)。
@@ -13,7 +13,7 @@
 
 采用**适配器优先**（可行性报告中的方案 A）：
 
-1. `plugins/` — 上游 hook 脚本原样复制（零改动，测试原样复用）
+1. `plugins/` — 上游 hook 脚本原样复制（测试原样复用）；唯一例外：format-code 含一处本地修复（2de2b76，按项目自身格式化器 oxfmt/prettier 选择，不再盲跑 prettier）
 2. `adapter/` — OpenCode 插件基座：接收 OpenCode 的 permission/tool 事件，拼装 Claude Code 格式 JSON payload，spawn 现有脚本，将 stdout 决策映射回 OpenCode 的 `effect: allow/ask/deny`
 
 验证通过后，再逐个对 A 级插件做原生化（方案 B）。
@@ -29,7 +29,7 @@ opencode-hooks/
 │   ├── block-dangerous-commands/
 │   ├── case-insensitive-guard/
 │   ├── config-guard/
-│   ├── format-code/            # 通道 3：写后自动 ruff/prettier
+│   ├── format-code/            # 通道 3：写后自动 ruff/prettier/oxfmt（含本地修复 2de2b76）
 │   ├── git-safety/
 │   ├── guard-pack/
 │   ├── protect-secrets/
@@ -75,7 +75,7 @@ npm test
 - [x] 端到端实测（三通道全通过：force-push 拦截、hooks.json 拦截、auto-stage/format-code 生效、subagent-cap 拦截）
 - [x] 启动自检 probeGuards（防 fail-open 静默失效）
 - [x] A 级插件全部接入（10 个；notify-permission 已移除）
-- [x] A 级上游测试在新仓库回归（1034/1034 通过；原 1063 含 notify-permission 的 29 个，随该插件移除）
+- [x] A 级上游测试在新仓库回归（1255/1255 通过，2026-11-17 同步 guard-pack 1.3.0 后；此前 1034/1034，原 1063 含 notify-permission 的 29 个随该插件移除）
 - [x] 范围收口：B/C 级 9 个不移植（docs/porting-decisions.md，含 session-logger 分析存档）——**项目完成**
 - [x] worktree-ignore 插件（新建 worktree 前写入受管忽略块；18 项单测 + 真实 OpenCode e2e 三组通过）
 
