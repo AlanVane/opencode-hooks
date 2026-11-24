@@ -2,7 +2,7 @@
 
 > Secrets firewall: stops Claude from reading, modifying, or exfiltrating sensitive files (.env, SSH keys, cloud credentials) before the tool call runs.
 
-A `PreToolUse` hook fires before every `Read`, `Edit`, `Write`, `Bash`, and `Grep` call. File tools and searches are checked against sensitive-path patterns (.env and .envrc, SSH private keys and authorized_keys, AWS/kube/gcloud/azure/docker credentials, .netrc/.npmrc/.pypirc, PEM/key/PKCS12 files, keystores, vault tokens); Bash commands are checked against secret-exposing patterns (cat/less/head on secrets, `printenv` and bare `env` dumps, `echo $SECRET_KEY`-style variable prints, sourcing .env, `/proc/*/environ`) and exfiltration patterns (curl/wget uploads, scp/rsync/nc of secrets, plus cp/mv/rm/truncate on them). A match returns `permissionDecision: "deny"` (or `"ask"`, see below) with the pattern id and reason, so you always know exactly which rule fired. Template files like `.env.example`, `.env.sample`, and `.env.template` are explicitly allowlisted. In a Bash command the allowlist applies to each path on its own, so a template name elsewhere in the command (`cat .env # .env.example`) does not clear the real file. Path matching is separator-agnostic, so a Windows `C:\Users\me\project\.env` is treated exactly like `/home/me/project/.env`.
+A `PreToolUse` hook fires before every `Read`, `Edit`, `Write`, `Bash`, and `Grep` call. File tools and searches are checked against sensitive-path patterns (.env and .envrc, SSH private keys and authorized_keys, AWS/kube/gcloud/azure/docker credentials, .netrc/.npmrc/.pypirc, PEM/key/PKCS12 files, keystores, vault tokens); Bash commands are checked against secret-exposing patterns (cat/less/head on secrets, `printenv` and bare `env`, `export -p`, `declare -p` or `set` dumps anywhere in the line, `echo $SECRET_KEY`-style variable prints, including names with digits such as `$S3_SECRET_KEY` and the short forms `$DB_PASS`, `$GH_PAT` and `$MYSQL_PWD`, and `cat <<< "$SECRET_KEY"` herestrings into a reader, sourcing .env, `/proc/*/environ` at any depth, such as `/proc/self/task/1/environ`, or after a `cd` into `/proc`) and exfiltration patterns (curl/wget uploads, scp/rsync/nc of secrets, plus cp/mv/rm/truncate on them). Every file the file tools refuse is refused to the shell too, at the same level: a command that reads it (cat, sed, sort, nl, strings, xxd, base64, `dd if=` and the other text and byte readers), sources it, takes it through `<` or writes it through `>`, `>>` or tee, copies, moves, links, deletes or truncates it, or sends it with scp, rsync, or a curl or wget upload argument (`-T`, `-d @`, `--json @`, `--data-urlencode name@`, `-F name=@` or `name=<`, `--post-file`, `--body-file`) is denied. So are `cp`, `mv`, `rm`, scp and rsync of a whole `~/.ssh`, `~/.aws` or `~/.kube` directory, and a dotfile glob such as `.e*` that can match a secret. A match returns `permissionDecision: "deny"` (or `"ask"`, see below) with the pattern id and reason, so you always know exactly which rule fired. Template files like `.env.example`, `.env.sample`, and `.env.template` are explicitly allowlisted. In a Bash command the allowlist applies to each path on its own, so a template name elsewhere in the command (`cat .env # .env.example`) does not clear the real file. Path matching is separator-agnostic, so a Windows `C:\Users\me\project\.env` is treated exactly like `/home/me/project/.env`.
 
 ## Install
 
@@ -13,11 +13,30 @@ A `PreToolUse` hook fires before every `Read`, `Edit`, `Write`, `Bash`, and `Gre
 
 Restart Claude Code, done. (Or from a shell: `claude plugin install protect-secrets@claude-code-hooks`.)
 
+## Codex CLI
+
+```sh
+codex plugin marketplace add karanb192/claude-code-hooks
+codex plugin add protect-secrets@claude-code-hooks
+```
+
+Open `/hooks` in Codex and approve this plugin. Re-approve after every update; Codex skips unapproved or changed hooks. Do not install it alongside [guard-pack](../guard-pack#codex-cli), which includes this guard.
+
+This entry point checks `Bash` and native `apply_patch` calls. Patch files are checked individually; unreadable patches are blocked. Shell patches must use a plain command with a quoted heredoc; `apply_patch` anywhere else in a command, such as behind `timeout` or `eval`, is blocked. Literal searches and commit messages mentioning `apply_patch` pass. See [the shared adapter's limits](../guard-pack#codex-cli), including shell sessions and dynamically constructed commands.
+
+Export configuration variables before launching Codex. An ask-mode match becomes a block because Codex hooks cannot ask. Logs stay in `~/.claude/hooks-logs/` with `host: "codex"`, including on Codex-only machines.
+
 ## What it does
 
 | Event | Runs | What happens |
 |-------|------|--------------|
 | PreToolUse (`Read\|Edit\|Write\|Bash\|Grep`) | sync (must decide before the tool runs) | Matches the file path (Read/Edit/Write), the search target (Grep) or the command (Bash) against tiered sensitive patterns; on a hit, denies or asks with the pattern id and reason. Everything else passes through untouched. |
+
+## How it reads a Bash command
+
+It shares its command reader with [block-dangerous-commands](../block-dangerous-commands#how-it-reads-a-command). Quotes and escapes do not change the verdict: `cat ./.e"nv"`, `c''at .env` and `cat .\env` are refused like `cat .env`, as is a read inside a substitution such as `echo "$(c'a't .env)"`. Quoted `echo`, `printf`, commit and heredoc text that only mentions a secret file is not matched, so `echo 'never cat .env'` is allowed. A double-quoted string that expands is not a message: `echo "$API_KEY"` is still refused. A `;`, `|`, `&` or newline inside quotes does not end a command, so `echo "user=$USER; token=$GITHUB_TOKEN"` and a multi-line `gemini -p` prompt that names `$OPENAI_API_KEY` are refused too.
+
+A word whose quotes hold a space keeps its quotes for the patterns, but the file check reads each operand as bash passes it, so `cat "my dir/.e"nv` is refused as a read of `.env`.
 
 ## Search and Windows coverage
 
@@ -47,6 +66,7 @@ All optional, set via environment variables (in the hook command, or exported wh
 | `HOOK_ASK_CRITICAL` | unset (deny) | Literal string `true` makes `critical`-level matches prompt you instead of blocking. |
 | `HOOK_ASK_HIGH` | unset (deny) | Same, for `high`-level matches. |
 | `HOOK_ASK_STRICT` | unset (deny) | Same, for `strict`-level matches. |
+| `HOOK_FAIL_OPEN` | unset (deny) | The literal string `true` lets the call through when the guard's own check throws, instead of denying it. See [When the guard fails](#when-the-guard-fails). |
 
 Ask mode is strictly opt-in and per level: only the literal string `true` enables it, and enabling it for one level never softens another. A common setup: keep `critical` on deny, set `HOOK_ASK_STRICT=true` so cautionary patterns prompt instead of blocking.
 
@@ -59,8 +79,8 @@ Token-saver plugins such as Spotify's [shunt](https://github.com/spotify/portal-
 | `high` | `model-cli-secret-file` | A secret file (the `critical` and `high` names above) reaching a model CLI via `<`, `$(...)`, a file flag, or a pipe from a reader | `gemini -p "review" < .env` |
 | `high` | `model-cli-secret-var` | A secret-named variable (`$OPENAI_API_KEY`, `$GH_PAT`; `$AUTHOR` and `$KEYWORDS` are prose) passed to a model CLI | `gemini -p "$GEMINI_API_KEY"` |
 | `high` | `model-api-secret-body` | A request to a model API host with a secret file or secret var in its body (`-d @`, `-F x=@`, `-T`, `< file`, httpie `x=@`) | `curl https://api.openai.com/v1/chat/completions -d "prompt=$OPENAI_API_KEY"` |
-| `strict` | `model-cli-file-input` | Any file contents reaching a model CLI (reader pipe, `<`, `$(cat ...)`, per-CLI file flags, gemini `@path`) | `cat src/*.ts \| gemini -p "summarize"` |
-| `strict` | `model-api-file-body` | Any file body sent to a model API host | `curl https://api.openai.com/v1/chat/completions -d @body.json` |
+| `strict` | `model-cli-file-input` | Any file contents reaching a model CLI (a pipe from a reader such as cat, sed, sort, awk, jq or `git log -p`, where an option value such as `sort -k 3` is not a file, `<` before or after the command, `$(cat ...)`, `$(<file)` or another reader in `$(...)`, per-CLI file flags, gemini `@path`; a multi-line prompt does not hide the redirect) | `cat src/*.ts \| gemini -p "summarize"` |
+| `strict` | `model-api-file-body` | Any file body sent to a model API host, including `-T` inside a flag cluster such as `-sT` and a body piped from a reader (from cat, head or tail into any request; from the newer readers such as sort or jq into a request that reads its stdin: `-d @-`, `-T -`, httpie) | `curl https://api.openai.com/v1/chat/completions -d @body.json` |
 
 Strict is opt-in: many people pipe code to a second model on purpose, so the default only fires when secret material is on the wire. An older pattern wins when it matches first (`cat .env | gemini` is `cat-env`). Not caught by design: `gemini --version`, `curl https://api.openai.com/v1/models`, a key in an `Authorization` header with an inline body, heredocs and herestrings, prose that names a secret file inside a quoted prompt, a secret used by an earlier command in the pipeline, local models such as `ollama`. Out of reach for a regex on the command string: variable indirection (`K=$KEY; gemini "$K"`), credential emitters (`$(gh auth token)`), scripts that open the connection themselves, file names outside the list above.
 
@@ -78,6 +98,10 @@ This hook sees the command string only, so a script that opens files itself is o
   "sandbox": { "enabled": true, "network": { "allowedDomains": ["github.com", "registry.npmjs.org"], "strictAllowlist": true } }
 }
 ```
+
+## When the guard fails
+
+From 1.3.0, a guard that cannot finish its check refuses the call instead of allowing it. A check that throws is denied with a `[guard-error]` reason. A timeout (10 s) or a missing `node` is blocked by `"onFailure": "block"` on Claude Code v2.1.295 or later; older versions ignore that key and let the call run. On Codex a missing `node` is blocked by the command's `|| exit 2`, but a timeout still lets the call run, because Codex has no setting for it. Set `HOOK_FAIL_OPEN=true` to let the call through when the check throws; [When a guard fails](../../README.md#-when-a-guard-fails) covers the rest of the way back.
 
 ## Data & privacy
 

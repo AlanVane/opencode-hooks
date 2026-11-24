@@ -15,6 +15,19 @@ A `PreToolUse` hook on the `Agent` tool (older name `Task`). Every spawn in a se
 
 Restart Claude Code, done. Already running [guard-pack](../guard-pack)? It includes this guard; do not install both.
 
+## Codex CLI
+
+```sh
+codex plugin marketplace add karanb192/claude-code-hooks
+codex plugin add subagent-spawn-cap@claude-code-hooks
+```
+
+Open `/hooks` in Codex and approve this plugin. Re-approve after every update; Codex skips unapproved or changed hooks. Do not install it alongside [guard-pack](../guard-pack#codex-cli), which includes this guard.
+
+Codex uses a **deny-only budget per thread**, accepting both `spawn_agent` and the `collaborationspawn_agent` hook name observed on Codex CLI 0.169.0. `SPAWN_CAP_DENY=60` permits the first 59 calls and blocks the 60th; `SPAWN_CAP_ASK` and `SPAWN_CAP_ASK_STEP` have no effect. Export the variables before launching Codex. `SPAWN_CAP_ALLOW=true` still records calls while bypassing the limit.
+
+The hook's `session_id` identifies the Codex thread. Resumes retain their count; nested threads have separate budgets, so this is not a whole-tree cap. Ledgers use `~/.claude/subagent-spawn-cap/codex-<session_id>.jsonl` to avoid sharing counts with Claude. Parallel calls can overshoot the threshold as described below. Calls without a session id pass uncounted and log a warning.
+
 ## What it does
 
 | Event | Matcher | What happens |
@@ -30,8 +43,10 @@ Per the [hooks reference](https://code.claude.com/docs/en/hooks#pretooluse-decis
 What Claude sees at spawn 60:
 
 ```
-🚨 [spawn-cap] Subagent spawn #60 in this session hit the hard cap (SPAWN_CAP_DENY=60). Do not retry: finish with the results you already have and tell the user the session's spawn budget is spent. The user can reset it by deleting ~/.claude/subagent-spawn-cap/<session_id>.jsonl, or raise SPAWN_CAP_DENY in the settings.json env block and restart.
+🚨 [spawn-cap] Subagent spawn #60 in this session hit the hard cap (SPAWN_CAP_DENY=60). Do not retry: finish with the results you already have and tell the user the session's spawn budget is spent. Only the user can lift it, by raising SPAWN_CAP_DENY in the settings.json env block and restarting.
 ```
+
+The deny text does not name the ledger file, because a model that knows which file holds its budget can delete it and keep going. [config-guard](../config-guard) (also in [guard-pack](../guard-pack)) refuses an agent's attempt to delete, truncate or rewrite the ledger. To reset a session's budget, delete its file from your own shell.
 
 ## Configuration
 
@@ -43,14 +58,19 @@ Hook processes inherit the environment Claude Code was launched with: set these 
 | `SPAWN_CAP_ASK_STEP` | `10` | Prompt again every this many spawns after `SPAWN_CAP_ASK`; `1` prompts on every spawn. Positive integer. |
 | `SPAWN_CAP_DENY` | `60` | Spawn number denied outright. Clamped up to `SPAWN_CAP_ASK` if set lower; equal to it skips the ask stage. |
 | `SPAWN_CAP_ALLOW` | unset | The literal string `true` lets spawns through past both thresholds while set; each is still recorded and logged `ALLOW_OVERRIDE`. |
+| `HOOK_FAIL_OPEN` | unset (deny) | The literal string `true` lets the call through when the guard's own check throws, instead of denying it. See [When the guard fails](#when-the-guard-fails). |
 
 `HOOK_SAFETY_LEVEL` is not read: the repo's levels pick pattern sets, a budget is a number, and a hidden level-to-number table would move your budget whenever you tune the level for another guard.
 
 **Unattended runs.** In `claude -p` with no permission host and in `dontAsk` mode, anything that would prompt is denied ([headless reference](https://code.claude.com/docs/en/headless)), so the ask threshold is the effective hard stop: with the defaults an unattended session ends at spawn 20, not 60. Set `SPAWN_CAP_ASK` equal to `SPAWN_CAP_DENY` for CI so Claude gets the deny text it can act on.
 
+## When the guard fails
+
+From 1.2.0, a guard that cannot finish its check refuses the call instead of allowing it. A check that throws is denied with a `[guard-error]` reason. A timeout (10 s) or a missing `node` is blocked by `"onFailure": "block"` on Claude Code v2.1.295 or later; older versions ignore that key and let the call run. On Codex a missing `node` is blocked by the command's `|| exit 2`, but a timeout still lets the call run, because Codex has no setting for it. Set `HOOK_FAIL_OPEN=true` to let the call through when the check throws; [When a guard fails](../../README.md#-when-a-guard-fails) covers the rest of the way back.
+
 ## State
 
-One append-only JSONL per session at `~/.claude/subagent-spawn-cap/<session_id>.jsonl`, one line per allowed or asked spawn (`ts`, `n`, `decision`, `subagent_type`, `description` truncated to 80 chars, plus `agent_id` / `agent_type` inside subagents). Append-only because parallel tool calls in one turn fire parallel hook processes; `O_APPEND` writes survive that, a read-modify-write counter does not. Denied calls are not written. An asked call is written before you answer, so a declined ask still consumed one budget unit. Ledgers untouched for 7 days are pruned, at most once a day. Delete a session's file to reset its budget. Verdicts, `ALLOW_OVERRIDE` bypasses and config warnings go to `~/.claude/hooks-logs/`; the ledger never stores the prompt; no network calls.
+One append-only JSONL per session at `~/.claude/subagent-spawn-cap/<session_id>.jsonl`, one line per allowed or asked spawn (`ts`, `n`, `decision`, `subagent_type`, `description` truncated to 80 chars, plus `agent_id` / `agent_type` inside subagents). Append-only because parallel tool calls in one turn fire parallel hook processes; `O_APPEND` writes survive that, a read-modify-write counter does not. Denied calls are not written. An asked call is written before you answer, so a declined ask still consumed one budget unit. Ledgers untouched for 7 days are pruned, at most once a day. Delete a session's file from your own shell to reset its budget; config-guard refuses that delete when the agent tries it. Verdicts, `ALLOW_OVERRIDE` bypasses and config warnings go to `~/.claude/hooks-logs/`; the ledger never stores the prompt; no network calls.
 
 ## Known limits
 

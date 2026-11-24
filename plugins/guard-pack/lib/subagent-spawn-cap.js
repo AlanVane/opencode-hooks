@@ -134,12 +134,14 @@ function shouldAsk(count, t) {
   return count >= t.ask && (count - t.ask) % t.step === 0;
 }
 
-// Ask reasons are shown to the user, deny reasons to Claude (hooks reference).
+// Ask reasons are shown to the user, deny reasons to Claude (hooks reference),
+// so only the ask text names the ledger: a model told which file holds its
+// budget can delete it and carry on.
 function buildReason(decision, n, t, file) {
-  const ledger = displayPath(file);
   if (decision === 'deny') {
-    return `[spawn-cap] Subagent spawn #${n} in this session hit the hard cap (SPAWN_CAP_DENY=${t.deny}). Do not retry: finish with the results you already have and tell the user the session's spawn budget is spent. The user can reset it by deleting ${ledger}, or raise SPAWN_CAP_DENY in the settings.json env block and restart.`;
+    return `[spawn-cap] Subagent spawn #${n} in this session hit the hard cap (SPAWN_CAP_DENY=${t.deny}). Do not retry: finish with the results you already have and tell the user the session's spawn budget is spent. Only the user can lift it, by raising SPAWN_CAP_DENY in the settings.json env block and restarting.`;
   }
+  const ledger = displayPath(file);
   const silent = Math.min(t.step - 1, t.deny - n - 1);
   const nextCheck = n + t.step < t.deny ? `next check at #${n + t.step}, ` : '';
   const after = silent > 0
@@ -194,12 +196,26 @@ function evaluateSpawn(event, env = process.env, now = Date.now()) {
   };
 }
 
+// A check that throws must not read as an allow, so the call is denied.
+// HOOK_FAIL_OPEN=true restores the old allow-on-error behaviour.
+function guardError(e) {
+  if (process.env.HOOK_FAIL_OPEN === 'true') return '{}';
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: `🚨 [guard-error] subagent-spawn-cap could not check this call (${String(e && e.message).slice(0, 200)}), so it is blocked. Run it yourself if you meant it, or set HOOK_FAIL_OPEN=true to let calls through when a guard fails.`,
+    },
+  });
+}
+
 async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
 
+  let data;
   try {
-    const data = JSON.parse(input);
+    data = JSON.parse(input);
     if (!isSpawnTool(data.tool_name)) return console.log('{}');
 
     const r = evaluateSpawn(data);
@@ -216,8 +232,16 @@ async function main() {
     }));
   } catch (e) {
     log({ level: 'ERROR', error: e.message });
-    console.log('{}');
+    console.log(data !== null && typeof data === 'object' ? guardError(e) : '{}');
   }
+}
+
+function evaluateCodexSpawn(event, env = process.env, now = Date.now()) {
+  const deny = parsePositiveInt(env.SPAWN_CAP_DENY, DEFAULT_DENY);
+  const result = evaluateSpawn({ ...event, session_id: event.session_id ? `codex-${event.session_id}` : undefined },
+    { ...env, SPAWN_CAP_ASK: String(deny), SPAWN_CAP_DENY: String(deny) }, now);
+  if (result.reason) result.reason = result.reason.replace('in the settings.json env block and restart', 'in the hook environment and restart');
+  return result;
 }
 
 if (require.main === module) {
@@ -226,6 +250,6 @@ if (require.main === module) {
   module.exports = {
     SPAWN_TOOLS, DEFAULT_ASK, DEFAULT_ASK_STEP, DEFAULT_DENY, EMOJIS, STATE_DIR,
     isSpawnTool, readThresholds, parsePositiveInt, sessionFile, displayPath, countLines,
-    pruneStale, shouldAsk, buildReason, evaluateSpawn,
+    pruneStale, shouldAsk, buildReason, evaluateSpawn, evaluateCodexSpawn,
   };
 }

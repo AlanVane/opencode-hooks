@@ -12,8 +12,9 @@
  * later deny must outrank it (deny > ask, as when the standalone hooks run
  * side by side). The verdict is emitted in that guard's own output
  * format, suffixed "(via guard-pack)". A guard that throws is logged and
- * skipped so one broken guard can never switch off the other six
- * (fail-open per guard, same convention as the standalone hooks).
+ * the rest still run, so a real deny keeps its own reason; if none denies,
+ * the call is denied as a guard error (fail-closed, same as the standalone
+ * hooks; HOOK_FAIL_OPEN=true skips the broken guard instead).
  *
  * The seven guard scripts in lib/ are byte-identical copies of the individual
  * plugin scripts; a repo test pins them, so they cannot drift. lib/host.js is
@@ -46,105 +47,9 @@ const LIB = path.join(__dirname, 'lib');
 const host = require('./lib/host');
 const LOG_DIR = path.join(process.env.HOME || process.env.USERPROFILE || require('os').homedir(), '.claude', 'hooks-logs');
 
-const envBool = (key) => process.env[key] === 'true';
-
-// Two emoji vocabularies exist across the guards; kept per guard so the
-// pack's output is character-identical to the standalone hook's.
-const STD_EMOJIS = { critical: '🚨', high: '⛔', strict: '⚠️' };
-const LOCK_EMOJIS = { critical: '🔒', high: '🛡️', strict: '⚠️' };
-
-// Each entry mirrors its guard's main(): same tool filter, same escape
-// hatches, same reason template. run(mod, tool, input, cwd, event) returns
-// null (pass) or { id, level, ask, reason, log? }; reason lacks only the
-// emoji prefix, log adds fields to the audit line, event is the full payload.
-// Keep the pack's dispatch and hooks.json registration in sync.
+const { GUARDS, failOpen, guardErrorReason } = require('./lib/dispatch');
 const PACK_TOOLS = ['Bash', 'Read', 'Edit', 'MultiEdit', 'Write', 'Agent', 'Task', 'Grep'];
-
-const GUARDS = [
-  {
-    // One string compare for other tools; the only guard that applies on a spawn.
-    name: 'subagent-spawn-cap',
-    emojis: { critical: '🚨', high: '⚠️', strict: '⚠️' },
-    run(mod, tool, input, cwd, event) {
-      if (!mod.isSpawnTool(tool)) return null;
-      const r = mod.evaluateSpawn({ ...(event || {}), tool_name: tool, tool_input: input });
-      if (r.decision === 'allow') return null;
-      return { id: 'spawn-cap', level: r.decision === 'deny' ? 'critical' : 'high', ask: r.decision === 'ask', reason: r.reason, log: r.logFields };
-    },
-  },
-  {
-    name: 'config-guard',
-    emojis: LOCK_EMOJIS,
-    skip: () => envBool('CONFIG_GUARD_ALLOW'),
-    run(mod, tool, input) {
-      const r = mod.checkTool(tool, input || {});
-      if (!r.blocked) return null;
-      return {
-        id: r.id, level: r.level, ask: mod.ASK[r.level] === true,
-        reason: `[${r.id}] ${r.reason}. Guardrail config is protected; if this change is intentional and human-approved, set CONFIG_GUARD_ALLOW=true for this call or edit the file yourself.`,
-      };
-    },
-  },
-  {
-    name: 'block-dangerous-commands',
-    emojis: STD_EMOJIS,
-    run(mod, tool, input) {
-      if (tool !== 'Bash') return null;
-      const r = mod.checkCommand(input?.command || '');
-      if (!r.blocked) return null;
-      const p = r.pattern;
-      return { id: p.id, level: p.level, ask: mod.ASK[p.level] === true, reason: `[${p.id}] ${p.reason}` };
-    },
-  },
-  {
-    name: 'protect-secrets',
-    emojis: STD_EMOJIS,
-    run(mod, tool, input) {
-      if (!mod.HANDLED_TOOLS.includes(tool)) return null;
-      const r = mod.check(tool, input);
-      if (!r.blocked) return null;
-      const p = r.pattern;
-      const action = { Read: 'read', Edit: 'modify', Write: 'write to', Bash: 'execute', Grep: 'search' }[tool];
-      return { id: p.id, level: p.level, ask: mod.ASK[p.level] === true, reason: `[${p.id}] Cannot ${action}: ${p.reason}` };
-    },
-  },
-  {
-    name: 'protect-tests',
-    emojis: STD_EMOJIS,
-    run(mod, tool, input, cwd) {
-      const r = mod.checkTool(tool, input || {}, undefined, cwd);
-      if (!r.blocked) return null;
-      return {
-        id: r.id, level: r.level, ask: false,
-        reason: `[${r.id}] ${r.reason}. Fix the code, don't disable the test: or run this manually if the removal is intentional.`,
-      };
-    },
-  },
-  {
-    name: 'git-safety',
-    emojis: STD_EMOJIS,
-    run(mod, tool, input) {
-      if (tool !== 'Bash') return null;
-      const r = mod.checkCommand(input?.command || '');
-      if (!r.blocked) return null;
-      return { id: r.pattern.id, level: r.pattern.level, ask: false, reason: `[${r.pattern.id}] ${r.reason}` };
-    },
-  },
-  {
-    name: 'case-insensitive-guard',
-    emojis: STD_EMOJIS,
-    run(mod, tool, input, cwd) {
-      if (tool !== 'Bash' || !input?.command) return null;
-      const r = mod.checkCommand(input.command, cwd);
-      if (!r.blocked) return null;
-      const hit = r.hit;
-      return {
-        id: 'case-collision', level: hit.level, ask: mod.ASK[hit.level] === true,
-        reason: `[case-collision] ${hit.cmd} targets '${hit.typed}' but this case-insensitive directory contains '${hit.actual}': same path on disk, so the differently-cased entry would be hit`,
-      };
-    },
-  },
-];
+const ERROR_EMOJIS = { critical: '🚨' };
 
 function log(data) {
   try {
@@ -158,6 +63,7 @@ function log(data) {
 // with its guard attached. Exported for tests.
 function evaluate(toolName, toolInput, cwd, event) {
   let ask = null;
+  let error = null;
   for (const g of GUARDS) {
     try {
       if (g.skip && g.skip()) continue;
@@ -169,9 +75,10 @@ function evaluate(toolName, toolInput, cwd, event) {
       ask = ask || hit;
     } catch (e) {
       log({ level: 'ERROR', guard: g.name, error: e.message });
+      if (!error && !failOpen()) error = { guard: g.name, emojis: ERROR_EMOJIS, id: 'guard-error', level: 'critical', ask: false, reason: guardErrorReason(g.name, e) };
     }
   }
-  return ask;
+  return error || ask;
 }
 
 // Codex: check every Claude-shaped call a patch or command turns into, then
@@ -182,7 +89,7 @@ function codexVerdict(data) {
   for (const call of host.codexCalls(data)) {
     if (call.unreadable) return { reason: host.UNREADABLE_REASON, decision: 'deny', id: 'unreadable-patch', tool: data.tool_name };
     if (!PACK_TOOLS.includes(call.tool)) continue;
-    const v = evaluate(call.tool, call.input, data.cwd, { ...data, tool_name: call.tool, tool_input: call.input });
+    const v = evaluate(call.tool, call.input, data.cwd, { ...data, hook_host: 'codex', tool_name: call.tool, tool_input: call.input });
     if (!v) continue;
     const hit = { ...v, tool: call.tool };
     if (!v.ask) return { hit, decision: 'deny' };
@@ -193,8 +100,9 @@ function codexVerdict(data) {
 
 function runCodex(input) {
   let answer = host.codexAnswer('');
+  let data;
   try {
-    const data = JSON.parse(input);
+    data = JSON.parse(input);
     const r = codexVerdict(data);
     if (r) {
       const { session_id, cwd, permission_mode } = data;
@@ -209,6 +117,7 @@ function runCodex(input) {
     }
   } catch (e) {
     log({ level: 'ERROR', host: 'codex', error: e.message });
+    if (data !== null && typeof data === 'object' && !failOpen()) answer = host.codexAnswer(`${ERROR_EMOJIS.critical} ${guardErrorReason('guard-pack', e)}`);
   }
   if (answer.stderr) process.stderr.write(answer.stderr);
   process.exitCode = answer.exitCode;
@@ -219,8 +128,9 @@ async function main() {
   for await (const chunk of process.stdin) input += chunk;
   if (host.hostFromArgv(process.argv) === 'codex') return runCodex(input);
 
+  let data;
   try {
-    const data = JSON.parse(input);
+    data = JSON.parse(input);
     const { tool_name, tool_input, session_id, cwd, permission_mode } = data;
     if (!PACK_TOOLS.includes(tool_name)) return console.log('{}');
 
@@ -238,7 +148,14 @@ async function main() {
     }));
   } catch (e) {
     log({ level: 'ERROR', error: e.message });
-    console.log('{}');
+    if (data === null || typeof data !== 'object' || failOpen()) return console.log('{}');
+    console.log(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: `${ERROR_EMOJIS.critical} ${guardErrorReason('guard-pack', e)}`,
+      },
+    }));
   }
 }
 
